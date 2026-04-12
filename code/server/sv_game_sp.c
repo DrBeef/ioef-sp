@@ -496,7 +496,8 @@ static void SV_SP_SyncToShared( sp_gentity_t *sp_ent ) {
 	dst->loopSound       = src->loopSound;
 	dst->modelindex      = src->modelindex;
 	dst->modelindex2     = src->modelindex2;
-	// Skip modelindex3 (SP-only, no ioEF equivalent)
+	// modelindex3: SP-only field used for third-person weapon models.
+	// ioEF entityState_t has no modelindex3, so this value is dropped.
 	dst->clientNum       = src->clientNum;
 	dst->frame           = src->frame;
 	dst->solid           = src->solid;
@@ -505,11 +506,15 @@ static void SV_SP_SyncToShared( sp_gentity_t *sp_ent ) {
 	dst->powerups        = src->powerups;
 	dst->weapon          = src->weapon;
 	dst->legsAnim        = src->legsAnim;
-	// Skip legsAnimTimer (SP-only)
+	// legsAnimTimer: SP-only field for blending leg animations on the
+	// server side.  ioEF handles anim timers entirely client-side.
 	dst->torsoAnim       = src->torsoAnim;
-	// Skip torsoAnimTimer, scale, pushVec (SP-only)
+	// torsoAnimTimer: Same as legsAnimTimer, but for torso.  Dropped.
+	// scale: SP-only entity scale factor (ioEF doesn't support per-entity scale).
+	// pushVec: SP-only push/knockback vector (ioEF uses a different mechanism).
 
-	// Entity shared state
+	// Entity shared state (the "r" sub-struct in sharedEntity_t)
+	// These fields control collision, PVS visibility, and area portal state.
 	se->r.linked       = sp_ent->linked;
 	se->r.linkcount    = 0;
 	se->r.svFlags      = sp_ent->svFlags;
@@ -525,6 +530,27 @@ static void SV_SP_SyncToShared( sp_gentity_t *sp_ent ) {
 	se->r.ownerNum     = sp_ent->owner ? sp_ent->owner->s.number : ENTITYNUM_NONE;
 }
 
+/*
+===============
+SV_SP_SyncFromShared
+
+Reverse of SV_SP_SyncToShared: copies data from the engine's shadow
+sharedEntity_t back into the SP game module's sp_gentity_t.  Called
+after engine operations that modify entity state (SV_LinkEntity,
+SV_SetBrushModel, etc.).
+
+Only common fields are copied back.  SP-specific fields (modelindex3,
+legsAnimTimer, torsoAnimTimer, scale, pushVec) are deliberately NOT
+overwritten -- the engine never touches them, and clobbering them would
+destroy game state the SP module relies on.
+
+Key fields that flow back from the engine:
+  - linked, absmin, absmax: updated by SV_LinkEntity based on mins/maxs
+    and the entity's position in the world BSP.
+  - pos, apos (trajectory_t): the engine may modify these during movement.
+  - solid: may be recalculated by SV_SetBrushModel.
+===============
+*/
 static void SV_SP_SyncFromShared( sp_gentity_t *sp_ent ) {
 	int num = sp_ent->s.number;
 	sharedEntity_t *se;
@@ -556,7 +582,7 @@ static void SV_SP_SyncFromShared( sp_gentity_t *sp_ent ) {
 	dst->loopSound       = src->loopSound;
 	dst->modelindex      = src->modelindex;
 	dst->modelindex2     = src->modelindex2;
-	// Do NOT overwrite modelindex3 (SP-only)
+	// Preserve modelindex3 -- SP-only, engine never modifies it
 	dst->clientNum       = src->clientNum;
 	dst->frame           = src->frame;
 	dst->solid           = src->solid;
@@ -565,18 +591,37 @@ static void SV_SP_SyncFromShared( sp_gentity_t *sp_ent ) {
 	dst->powerups        = src->powerups;
 	dst->weapon          = src->weapon;
 	dst->legsAnim        = src->legsAnim;
-	// Do NOT overwrite legsAnimTimer (SP-only)
+	// Preserve legsAnimTimer -- SP-only, engine never modifies it
 	dst->torsoAnim       = src->torsoAnim;
-	// Do NOT overwrite torsoAnimTimer, scale, pushVec (SP-only)
+	// Preserve torsoAnimTimer, scale, pushVec -- all SP-only
 
 	sp_ent->linked = se->r.linked;
 	VectorCopy( se->r.absmin, sp_ent->absmin );
 	VectorCopy( se->r.absmax, sp_ent->absmax );
 }
 
-// Ensure entity data is registered with the engine.
-// Called lazily because ge->gentities isn't populated until partway
-// through ge->Init() (the game allocates its entity array during init).
+/*
+===============
+SV_SP_EnsureEntityData
+
+Wires up sv.gentities, sv.gameClients, and sv.num_entities so the engine's
+core systems (snapshot builder, collision) can find entity data.
+
+This is called lazily rather than at init time because ge->gentities is
+NULL when GetGameAPI returns -- the SP game module doesn't allocate its
+entity array until partway through ge->Init().  The first call to any
+engine function that touches entities (linkentity, trace, etc.) triggers
+this setup.
+
+sv.gentities is pointed at our shadow array (sv_sp_entities), NOT at the
+SP game's own entity array, because the engine expects sharedEntity_t
+layout.  sv.gentitySize is sizeof(sharedEntity_t) for the same reason.
+
+sv.gameClients is pointed at our translated playerState_t (sv_sp_playerState).
+sv.gameClientSize is 0 because SP only ever has one client (the player),
+so stride between client structs is irrelevant.
+===============
+*/
 static void SV_SP_EnsureEntityData( void ) {
 	if ( !entityDataLocated && ge && ge->gentities ) {
 		sv.gentities = sv_sp_entities;
@@ -604,8 +649,20 @@ static void SV_SP_EnsureEntityData( void ) {
 	}
 }
 
-// Set up gameClients pointer from the SP game's client struct.
-// Called after ClientConnect/ClientBegin when the client pointer is valid.
+/*
+===============
+SV_SP_SetupGameClient
+
+Refreshes the translated playerState after ClientConnect or ClientBegin.
+The SP game module may reallocate or reinitialize the client struct during
+these calls, so we re-translate and update sv.gameClients to ensure the
+engine's snapshot builder sees current data.
+
+This is also the point where we confirm the client pointer is non-NULL.
+Before ClientConnect, ent->client may be NULL (the game hasn't spawned the
+player yet), which would cause crashes in SV_SP_SyncPlayerState.
+===============
+*/
 static void SV_SP_SetupGameClient( int clientNum ) {
 	sp_gentity_t *ent = (sp_gentity_t *)( (byte *)ge->gentities + ge->gentitySize * clientNum );
 	if ( ent->client ) {
@@ -617,8 +674,24 @@ static void SV_SP_SetupGameClient( int clientNum ) {
 	}
 }
 
-// Sync ALL active entities from the SP game array to the shadow array.
-// Called before the engine builds snapshots so entity states are current.
+/*
+===============
+SV_SP_SyncAllEntities
+
+Bulk-syncs every active (inuse) entity from the SP game module's entity
+array into the engine's shadow sharedEntity_t array, and also refreshes
+the translated playerState.
+
+Called twice per frame in GAME_RUN_FRAME:
+  1. Before ge->RunFrame -- so that engine-side traces during the frame
+     (called through gi.trace) see up-to-date entity positions.
+  2. After ge->RunFrame -- so that the snapshot builder sees the final
+     post-frame entity states when it runs later in the server frame.
+
+Also updates sv.num_entities in case the game spawned or removed entities
+during the frame.
+===============
+*/
 static void SV_SP_SyncAllEntities( void ) {
 	int i;
 	int num_ents;
@@ -648,12 +721,14 @@ static void SV_SP_SyncAllEntities( void ) {
 	}
 }
 
+// Reset the pending-load state.  Called after a load completes or fails.
 static void SV_SP_ClearPendingLoad( void ) {
 	sv_sp_pendingLoadType = eNO;
 	sv_sp_pendingLoadQPath[0] = '\0';
 	sv_sp_pendingLoadMap[0] = '\0';
 }
 
+// Close an open save stream (read or write) and reset all its fields.
 static void SV_SP_CloseSaveStream( sv_sp_save_stream_t *stream ) {
 	if ( stream->file ) {
 		FS_FCloseFile( stream->file );
@@ -665,6 +740,17 @@ static void SV_SP_CloseSaveStream( sv_sp_save_stream_t *stream ) {
 	stream->qpath[0] = '\0';
 }
 
+/*
+===============
+SV_SP_NormalizeSaveSlotName
+
+Validates and normalizes a user-provided save slot name.  Strips the
+".sav" extension if present, rejects empty names, directory traversal
+attempts, path separators, and the reserved names "current" (used as
+a temp file during writes) and "virtual" (reserved by the original EF1
+save system).  Returns qtrue if the name is valid.
+===============
+*/
 static qboolean SV_SP_NormalizeSaveSlotName( const char *slotName, char *outBaseName, int outSize ) {
 	size_t length;
 
@@ -696,14 +782,18 @@ static qboolean SV_SP_NormalizeSaveSlotName( const char *slotName, char *outBase
 	return qtrue;
 }
 
+// Build the filesystem qpath for a save slot (e.g., "saves/quick.sav").
 static void SV_SP_BuildSaveQPath( const char *baseName, char *outQPath, int outSize ) {
 	Com_sprintf( outQPath, outSize, "saves/%s.sav", baseName );
 }
 
+// Read the current map name from the "mapname" cvar.
 static void SV_SP_GetMapName( char *outMapName, int outSize ) {
 	Q_strncpyz( outMapName, Cvar_VariableString( "mapname" ), outSize );
 }
 
+// Get a human-readable label for the current map.  Tries CS_MESSAGE first
+// (the level's display name), falls back to the raw map name.
 static void SV_SP_GetMapLabel( char *outMapLabel, int outSize ) {
 	SV_GetConfigstring( CS_MESSAGE, outMapLabel, outSize );
 	if ( !outMapLabel[0] ) {
@@ -714,6 +804,19 @@ static void SV_SP_GetMapLabel( char *outMapLabel, int outSize ) {
 	}
 }
 
+/*
+===============
+SV_SP_BuildSaveComment
+
+Builds the 128-byte comment block for a save file.  The comment has two
+halves (each 64 bytes, see SP_SAVE_SORTINFO_OFFSET):
+  - Display half: shown in the save/load menu.  For autosaves this is
+    "-------> MapLabel"; for manual saves it's either a stored comment
+    from the UI or a timestamp + map label.
+  - Sort half: always "HH:MM MM/DD/YY MapLabel", used for chronological
+    sorting in the save menu.
+===============
+*/
 static void SV_SP_BuildSaveComment( qboolean autosave, byte outComment[SP_SAVE_COMMENT_SIZE] ) {
 	char display[SP_SAVE_SORTINFO_OFFSET];
 	char sortInfo[SP_SAVE_SORTINFO_OFFSET];
@@ -749,6 +852,25 @@ static void SV_SP_BuildSaveComment( qboolean autosave, byte outComment[SP_SAVE_C
 	Q_strncpyz( (char *)outComment + SP_SAVE_SORTINFO_OFFSET, sortInfo, SP_SAVE_SORTINFO_OFFSET );
 }
 
+/*
+===============
+SV_SP_WriteSaveChunk
+
+Writes a single chunk to the save stream.  Each chunk on disk is:
+  [4] chunk ID    (little-endian)
+  [4] data length (little-endian)
+  [4] checksum    (little-endian, Com_BlockChecksum of data)
+  [N] data bytes
+  [4] magic sentinel (SP_SAVE_CHUNK_MAGIC, little-endian)
+
+The trailing magic sentinel allows the reader to detect truncated or
+corrupt files.  If any write fails, stream->failed is set and all
+subsequent writes become no-ops (callers chain writes with && and
+check at the end).
+
+Returns qtrue on success, qfalse on failure.
+===============
+*/
 static qboolean SV_SP_WriteSaveChunk( sv_sp_save_stream_t *stream, unsigned long chunkId, const void *data, int length ) {
 	unsigned int fileChunkId;
 	unsigned int fileLength;
@@ -779,6 +901,10 @@ static qboolean SV_SP_WriteSaveChunk( sv_sp_save_stream_t *stream, unsigned long
 	return qtrue;
 }
 
+// Read a chunk header (ID, length, checksum) from the save file without
+// reading or validating the data or trailing magic.  Used by both
+// SV_SP_ReadSaveChunk and SV_SP_ReadFromSaveGameOptional (which peeks
+// at the next chunk ID to decide whether to consume it).
 static qboolean SV_SP_ReadSaveChunkHeader( fileHandle_t file, unsigned int *chunkId, unsigned int *length, unsigned int *checksum ) {
 	unsigned int fileChunkId;
 	unsigned int fileLength;
@@ -803,6 +929,21 @@ static qboolean SV_SP_ReadSaveChunkHeader( fileHandle_t file, unsigned int *chun
 	return qtrue;
 }
 
+/*
+===============
+SV_SP_SkipSaveChunk
+
+Reads a chunk header, verifies the chunk ID and (optionally) length match
+expectations, then seeks past the data and validates the trailing magic
+sentinel -- all without actually reading the chunk data into memory.
+
+Used during load to skip over chunks the engine doesn't need to process
+(e.g., the COMM comment and SHOT screenshot during a full load, since
+those are only needed by the save/load UI).
+
+Returns the data length on success, 0 on failure.
+===============
+*/
 static int SV_SP_SkipSaveChunk( fileHandle_t file, unsigned long expectedChunkId, int expectedLength, qboolean quiet ) {
 	unsigned int chunkId;
 	unsigned int length;
@@ -849,6 +990,27 @@ static int SV_SP_SkipSaveChunk( fileHandle_t file, unsigned long expectedChunkId
 	return length;
 }
 
+/*
+===============
+SV_SP_ReadSaveChunk
+
+Reads a complete chunk from the save stream, validates it, and returns
+the data.  The caller can provide data storage in two ways:
+
+  1. Fixed buffer: pass 'buffer' (non-NULL) and 'expectedLength' > 0.
+     The chunk's length must match expectedLength exactly.
+
+  2. Dynamic allocation: pass buffer=NULL and outAllocatedBuffer (non-NULL).
+     The function allocates a buffer of the chunk's actual length via
+     Z_Malloc and returns it through *outAllocatedBuffer.  The caller
+     is responsible for freeing it with Z_Free.
+
+Validates chunk ID, length (if expectedLength > 0), trailing magic
+sentinel, and data checksum.  Sets stream->failed on any error.
+
+Returns the data length on success, 0 on failure.
+===============
+*/
 static int SV_SP_ReadSaveChunk( sv_sp_save_stream_t *stream, unsigned long expectedChunkId,
 		void *buffer, int expectedLength, void **outAllocatedBuffer, qboolean quiet ) {
 	unsigned int chunkId;
@@ -961,6 +1123,16 @@ static int SV_SP_ReadSaveChunk( sv_sp_save_stream_t *stream, unsigned long expec
 	return length;
 }
 
+/*
+===============
+SV_SP_WriteArchivedCvars
+
+Saves all cvars with the CVAR_ARCHIVE flag to the save stream.  Written
+as a CVCN chunk (count of cvars) followed by alternating CVAR/VALU chunk
+pairs (name string, value string).  This preserves engine settings like
+graphics quality, audio volume, key bindings, etc. across save/load.
+===============
+*/
 static qboolean SV_SP_WriteArchivedCvars( void ) {
 	cvar_t *var;
 	int count;
@@ -992,6 +1164,10 @@ static qboolean SV_SP_WriteArchivedCvars( void ) {
 	return qtrue;
 }
 
+// Skip past the archived cvar section in a save file without applying
+// the values.  Used during the initial scan of a save file (SV_SP_LoadGame)
+// to reach the GAME chunk and extract the map name, without actually
+// restoring settings yet -- that happens later in SV_SP_LoadPendingSave.
 static qboolean SV_SP_SkipArchivedCvars( sv_sp_save_stream_t *stream ) {
 	void *nameBuffer;
 	void *valueBuffer;
@@ -1024,6 +1200,8 @@ static qboolean SV_SP_SkipArchivedCvars( sv_sp_save_stream_t *stream ) {
 	return qtrue;
 }
 
+// Read the archived cvar section and apply each name/value pair via
+// Cvar_Set, restoring engine settings to their saved state.
 static qboolean SV_SP_RestoreArchivedCvars( void ) {
 	void *nameBuffer;
 	void *valueBuffer;
@@ -1057,6 +1235,25 @@ static qboolean SV_SP_RestoreArchivedCvars( void ) {
 	return qtrue;
 }
 
+/*
+===============
+SV_SP_WriteSpecialSaveCvars
+
+Writes autosave-specific cvars to the save stream.  These are only
+relevant for autosaves (level transitions), not for manual saves:
+
+  CVSV chunk  - "playersave" cvar: serialized player inventory/state
+                carried across level transitions.
+  AMMO chunks - "playerammo0" through "playerammo3": ammo counts for
+                each of the 4 ammo types, carried across levels.
+  ADPT chunks - "borgadapt0" through "borgadapt31": Borg adaptation
+                tracking for each weapon type (EF1-specific gameplay
+                mechanic where Borg enemies become resistant to weapons
+                used too frequently).
+
+For non-autosaves, this function is a no-op (returns qtrue immediately).
+===============
+*/
 static qboolean SV_SP_WriteSpecialSaveCvars( qboolean autosave ) {
 	char cvarName[32];
 	char value[SP_SAVE_CVAR_SIZE];
@@ -1093,6 +1290,9 @@ static qboolean SV_SP_WriteSpecialSaveCvars( qboolean autosave ) {
 	return qtrue;
 }
 
+// Restore autosave-specific cvars (playersave, playerammoN, borgadaptN)
+// from the save stream.  Counterpart to SV_SP_WriteSpecialSaveCvars.
+// No-op for non-autosave loads.
 static qboolean SV_SP_RestoreSpecialSaveCvars( qboolean autosave ) {
 	char cvarName[32];
 	char value[SP_SAVE_CVAR_SIZE];
@@ -1129,6 +1329,10 @@ static qboolean SV_SP_RestoreSpecialSaveCvars( qboolean autosave ) {
 	return qtrue;
 }
 
+// Write sv.time (level time) and svs.time (server real time) as TIME
+// and TIMR chunks.  Both are needed to restore the server's timing state
+// so that entity animations, event timers, and level triggers resume
+// from the correct point.
 static qboolean SV_SP_WriteServerTimes( void ) {
 	int fileTime;
 	int fileServerTime;
@@ -1140,6 +1344,7 @@ static qboolean SV_SP_WriteServerTimes( void ) {
 		SV_SP_WriteSaveChunk( &sv_sp_saveWrite, SP_SAVE_CHUNK_TIMR, &fileServerTime, sizeof( fileServerTime ) );
 }
 
+// Restore sv.time and svs.time from TIME/TIMR chunks in the save stream.
 static qboolean SV_SP_RestoreServerTimes( void ) {
 	int fileTime;
 	int fileServerTime;
@@ -1154,6 +1359,22 @@ static qboolean SV_SP_RestoreServerTimes( void ) {
 	return qtrue;
 }
 
+/*
+===============
+SV_SP_WriteConfigstrings
+
+Writes all non-empty configstrings (except CS_SERVERINFO, which is
+reconstructed at load time) to the save stream.  Written as:
+  CSCN chunk - count of non-empty configstrings
+  For each:
+    CSIN chunk - configstring index (int)
+    CSDA chunk - configstring data (null-terminated string)
+
+Configstrings carry model names, sound names, player info, and other
+per-level state that must be restored exactly for the client and game
+module to function correctly after a load.
+===============
+*/
 static qboolean SV_SP_WriteConfigstrings( void ) {
 	int configCount;
 	int fileCount;
@@ -1194,6 +1415,8 @@ static qboolean SV_SP_WriteConfigstrings( void ) {
 	return qtrue;
 }
 
+// Restore configstrings from CSCN/CSIN/CSDA chunks in the save stream.
+// CS_SERVERINFO is excluded (it's rebuilt from current server state).
 static qboolean SV_SP_RestoreConfigstrings( void ) {
 	void *stringData;
 	int fileCount;
@@ -1225,10 +1448,37 @@ static qboolean SV_SP_RestoreConfigstrings( void ) {
 	return qtrue;
 }
 
+// Convert the GAME chunk's autosave flag to a SavedGameJustLoaded_e enum.
+// The GAME chunk stores 0 for a full (manual) save, 1 for an autosave.
+// We map these to eAUTO and eFULL respectively -- note the inversion:
+// a "full save" triggers eFULL load semantics, an autosave triggers eAUTO.
 static SavedGameJustLoaded_e SV_SP_GameChunkToLoadType( int gameChunkValue ) {
 	return gameChunkValue ? eAUTO : eFULL;
 }
 
+/*
+===============
+SV_SP_LoadPendingSave
+
+Performs the actual save file restoration after the map has been loaded.
+This is the second phase of a two-phase load process:
+
+Phase 1 (SV_SP_LoadGame): Opens the save file, reads just enough to
+  extract the map name and save type, then issues an "spmap" command to
+  load the correct map.  The save file is closed; the map name and qpath
+  are stored in sv_sp_pendingLoad* variables.
+
+Phase 2 (this function): Called from SV_SP_InitGameVM after ge->Init
+  has run on the freshly loaded map.  Reopens the save file, skips the
+  header chunks (COMM, SHOT, MPCM), restores archived cvars, special
+  autosave cvars, server times, and configstrings, then calls
+  ge->ReadLevel to restore the game module's internal state.
+
+The two-phase approach is necessary because the game module must be
+initialized on the correct map before its ReadLevel function can run --
+it needs the BSP data, entity string, and initialized entity array.
+===============
+*/
 static qboolean SV_SP_LoadPendingSave( void ) {
 	int gameChunkValue;
 
@@ -1280,16 +1530,24 @@ static qboolean SV_SP_LoadPendingSave( void ) {
 	return qtrue;
 }
 
-// game_import_t struct we fill and pass to GetGameAPI
+// The game_import_t we populate and pass to GetGameAPI.  The SP game
+// module stores a copy of this struct and calls through these function
+// pointers for all engine services.
 static sp_game_import_t	gi;
 
-// Dummy array for S_Override field
+// Dummy array for the S_Override pointer in sp_game_import_t.
+// The original EF1 engine exposed a sound override table here; ioEF
+// doesn't support this feature, but the SP game module reads/writes
+// the array during gameplay.  Providing a valid buffer prevents crashes.
 static int		s_override_dummy[256];
 
 // ============================================================================
 // Wrapper functions for sp_game_import_t
 // ============================================================================
 
+// Printf wrapper: the SP game module calls gi.Printf, which routes to
+// the engine's Com_Printf.  We use a local buffer to handle the varargs
+// since the SP DLL's calling convention may differ from the engine's.
 static void SV_SP_Printf( const char *fmt, ... ) {
 	va_list	argptr;
 	char	text[1024];
@@ -1301,6 +1559,8 @@ static void SV_SP_Printf( const char *fmt, ... ) {
 	Com_Printf( "%s", text );
 }
 
+// WriteCam: the SP game module can export camera path data to a file
+// for cinematic editing tools.  Appends text to maps/<mapname>.camera.
 static void SV_SP_WriteCam( const char *text ) {
 	char mapName[MAX_QPATH];
 	char qpath[MAX_QPATH];
@@ -1327,6 +1587,8 @@ static void SV_SP_WriteCam( const char *text ) {
 	Com_Printf( "Camera entity appended to %s\n", qpath );
 }
 
+// Error wrapper: the SP game module passes an error level (ERR_DROP,
+// ERR_FATAL, etc.) directly; we forward to Com_Error.
 static void SV_SP_Error( int errLevel, const char *fmt, ... ) {
 	va_list	argptr;
 	char	text[1024];
@@ -1394,14 +1656,35 @@ static int SV_SP_FS_GetFileList( const char *path, const char *extension, char *
 	return FS_GetFileList( path, extension, listbuf, bufsize );
 }
 
+// gi.AppendToSaveGame wrapper: delegates to our chunk writer.  The game
+// module calls this during ge->WriteLevel to serialize its internal state
+// (entity data, AI state, script variables, etc.) into the save stream.
+// The chunk ID is chosen by the game module -- we just pass it through.
 static qboolean SV_SP_AppendToSaveGame( unsigned long chid, void *data, int length ) {
 	return SV_SP_WriteSaveChunk( &sv_sp_saveWrite, chid, data, length );
 }
 
+// gi.ReadFromSaveGame wrapper: delegates to our chunk reader.  The game
+// module calls this during ge->ReadLevel to deserialize its saved state.
+// Returns the data length on success, 0 on failure.
 static int SV_SP_ReadFromSaveGame( unsigned long chid, void *pvAddress, int iLength, void **ppvAddressPtr ) {
 	return SV_SP_ReadSaveChunk( &sv_sp_saveRead, chid, pvAddress, iLength, ppvAddressPtr, qfalse );
 }
 
+/*
+===============
+SV_SP_ReadFromSaveGameOptional
+
+Like ReadFromSaveGame, but non-destructive if the next chunk doesn't
+match the requested ID.  Peeks at the next chunk header; if the ID
+matches, reads the chunk normally.  If it doesn't match, seeks back
+to the original file position and returns 0 without setting the
+failed flag.
+
+This allows the game module to probe for optional chunks that may
+or may not be present in older save files (forward compatibility).
+===============
+*/
 static int SV_SP_ReadFromSaveGameOptional( unsigned long chid, void *pvAddress, int iLength, void **ppvAddressPtr ) {
 	unsigned int nextChunkId;
 	unsigned int nextChunkLength;
@@ -1427,6 +1710,29 @@ static int SV_SP_ReadFromSaveGameOptional( unsigned long chid, void *pvAddress, 
 	return SV_SP_ReadSaveChunk( &sv_sp_saveRead, chid, pvAddress, iLength, ppvAddressPtr, qfalse );
 }
 
+/*
+===============
+SV_SP_SaveGame
+
+Writes a complete save file for the given slot name.  The process:
+
+1. Validate the slot name (reject empty, traversal, reserved names).
+2. Determine if this is an autosave ("auto" or "exitholodeck" slot).
+   Non-autosaves are gated by ge->GameAllowedToSaveHere.
+3. Gather metadata: map name, comment text, screenshot thumbnail.
+4. Write all engine-side chunks to a temp file ("saves/current.sav"):
+   COMM, SHOT, MPCM, archived cvars, GAME flag, special autosave cvars,
+   server times, configstrings.
+5. Call ge->WriteLevel to let the game module append its own chunks
+   (entity data, AI state, scripting state, etc.) to the same stream.
+6. Close the stream.  If everything succeeded, rename current.sav to
+   the final path (saves/<slotName>.sav).  If anything failed, delete
+   the temp file.
+
+The temp-file-then-rename approach prevents a failed save from
+corrupting an existing save file for the same slot.
+===============
+*/
 qboolean SV_SP_SaveGame( const char *slotName ) {
 	char baseName[MAX_QPATH];
 	char finalQPath[MAX_QPATH];
@@ -1505,6 +1811,28 @@ qboolean SV_SP_SaveGame( const char *slotName ) {
 	return qtrue;
 }
 
+/*
+===============
+SV_SP_LoadGame
+
+Initiates loading a save file.  This is phase 1 of the two-phase load
+process (see SV_SP_LoadPendingSave for phase 2).
+
+Phase 1:
+1. Validate the slot name and open the save file.
+2. Skip past the header chunks (COMM, SHOT) to reach MPCM (map name).
+3. Skip past archived cvars to reach the GAME chunk (autosave flag).
+4. Close the save file (it will be reopened in phase 2).
+5. Store the map name, qpath, and load type in sv_sp_pending* variables.
+6. Issue an "spmap <mapname>" command to load the correct map.
+
+The engine will process the spmap command, which calls SV_SpawnServer,
+which calls SV_SP_InitGameVM, which calls SV_SP_LoadPendingSave (phase 2)
+to actually restore the game state after the map is loaded.
+
+Returns qtrue if the save file was valid and the load was initiated.
+===============
+*/
 qboolean SV_SP_LoadGame( const char *slotName ) {
 	char baseName[MAX_QPATH];
 	char qpath[MAX_QPATH];
@@ -1559,6 +1887,7 @@ qboolean SV_SP_LoadGame( const char *slotName ) {
 	return qtrue;
 }
 
+// Delete a save file by slot name.  Used by the UI for "delete save" actions.
 qboolean SV_SP_WipeSaveGame( const char *slotName ) {
 	char baseName[MAX_QPATH];
 	char qpath[MAX_QPATH];
@@ -1585,6 +1914,9 @@ static void SV_SP_DropClient( int clientNum, const char *reason ) {
 	SV_DropClient( svs.clients + clientNum, reason );
 }
 
+// SendServerCommand: translates the SP game module's clientNum convention
+// (where -1 means "all clients") into the engine's client_t pointer
+// convention (where NULL means "all clients").
 static void SV_SP_SendServerCommand( int clientNum, const char *fmt, ... ) {
 	va_list	argptr;
 	char	text[1024];
@@ -1623,6 +1955,9 @@ static void SV_SP_GetServerinfo( char *buffer, int bufferSize ) {
 	SV_GetServerinfo( buffer, bufferSize );
 }
 
+// SetBrushModel: assigns an inline BSP model ("*N") to an entity, setting
+// its bounds and solid type.  Must sync to/from the shadow array because
+// SV_SetBrushModel reads and modifies sharedEntity_t fields.
 static void SV_SP_SetBrushModel( sp_gentity_t *ent, const char *name ) {
 	SV_SP_EnsureEntityData();
 	SV_SP_SyncToShared( ent );
@@ -1630,6 +1965,8 @@ static void SV_SP_SetBrushModel( sp_gentity_t *ent, const char *name ) {
 	SV_SP_SyncFromShared( ent );
 }
 
+// Trace wrapper: forwards to the engine's SV_Trace with capsule=qfalse.
+// SP game module doesn't use capsule collision.
 static void SV_SP_Trace( trace_t *results, const vec3_t start, const vec3_t mins,
 						 const vec3_t maxs, const vec3_t end, int passEntityNum,
 						 int contentmask ) {
@@ -1649,6 +1986,9 @@ static qboolean SV_SP_InPVSIgnorePortals( const vec3_t p1, const vec3_t p2 ) {
 	return SV_inPVSIgnorePortals( p1, p2 );
 }
 
+// AdjustAreaPortalState: must sync the entity to the shadow array first
+// because the engine looks up the entity's BSP brush model from the
+// sharedEntity_t to find which area portal to open/close.
 static void SV_SP_AdjustAreaPortalState( sp_gentity_t *ent, qboolean open ) {
 	SV_SP_EnsureEntityData();
 	SV_SP_SyncToShared( ent );
@@ -1659,6 +1999,10 @@ static qboolean SV_SP_AreasConnected( int area1, int area2 ) {
 	return CM_AreasConnected( area1, area2 );
 }
 
+// LinkEntity: registers the entity in the engine's spatial partition (the
+// area/PVS system) so it can be found by traces and EntitiesInBox queries.
+// Must sync before (so the engine sees current position/bounds) and after
+// (so the game gets back the engine-computed absmin/absmax and linked flag).
 static void SV_SP_LinkEntity( sp_gentity_t *ent ) {
 	SV_SP_EnsureEntityData();
 	SV_SP_SyncToShared( ent );
@@ -1673,6 +2017,21 @@ static void SV_SP_UnlinkEntity( sp_gentity_t *ent ) {
 	SV_SP_SyncFromShared( ent );
 }
 
+/*
+===============
+SV_SP_EntitiesInBox
+
+Spatial query: returns all entities whose bounding boxes intersect the
+given AABB.  The engine's SV_AreaEntities returns entity numbers (indices
+into the shadow array).  We must map these back to sp_gentity_t pointers
+in the SP game module's entity array, since the game module expects to
+receive its own entity pointers, not shadow array pointers.
+
+The mapping uses: (byte*)ge->gentities + ge->gentitySize * entityNum
+because the game module's entity array has a stride (gentitySize) that
+includes private game data beyond the engine-visible sp_gentity_t header.
+===============
+*/
 static int SV_SP_EntitiesInBox( const vec3_t mins, const vec3_t maxs, sp_gentity_t **list, int maxcount ) {
 	int	entityList[1024];
 	int	count;
@@ -1691,6 +2050,9 @@ static int SV_SP_EntitiesInBox( const vec3_t mins, const vec3_t maxs, sp_gentity
 	return count;
 }
 
+// EntityContact: tests if a bounding box touches an entity's collision
+// model.  Must sync the entity to the shadow array so the engine can
+// read its solid type and bounds.  Uses box collision (not capsule).
 static qboolean SV_SP_EntityContact( const vec3_t mins, const vec3_t maxs, const sp_gentity_t *ent ) {
 	SV_SP_EnsureEntityData();
 	SV_SP_SyncToShared( (sp_gentity_t *)ent );
@@ -1789,13 +2151,35 @@ to exchange function pointer tables, and validates the API version.
 ===============
 */
 
-// Stub syscall handler for the cgame side of the SP DLL.
-// The SP DLL contains both game (GetGameAPI) and cgame (dllEntry/vmMain).
-// The cgame's syscall pointer defaults to -1. If we don't initialize it,
-// any cgame code called during game RunFrame will crash.
+/*
+===============
+SV_SP_CgameSyscallStub
+
+Stub syscall handler installed via dllEntry for the cgame side of the
+SP DLL.
+
+Background: The EF1 SP DLL is a combined game+cgame module.  It exports
+both GetGameAPI (server-side) and dllEntry/vmMain (client-side).  The
+cgame side stores a global function pointer (typically called "syscall")
+that dllEntry initializes.  Before dllEntry is called, this pointer is
+set to -1 (0xFFFFFFFF) by the DLL's static initialization.
+
+The problem: Some functions in the DLL are shared between the game and
+cgame sides (utility functions, entity lookup helpers, etc.).  If any
+such function happens to call a cgame syscall during a server-side
+ge->RunFrame, the call goes through the -1 pointer and crashes instantly
+(SIGSEGV / access violation).
+
+The fix: During server-side init, we call dllEntry with this stub handler.
+It returns 0 for all syscall numbers, which is safe because:
+  - Render calls (trap_R_*) return 0 = no-op
+  - Sound calls (trap_S_*) return 0 = no-op
+  - CG_* queries return 0 = harmless defaults
+The server never actually needs cgame functionality; we just need the
+syscall pointer to not be -1 so that accidental calls don't crash.
+===============
+*/
 static intptr_t QDECL SV_SP_CgameSyscallStub( intptr_t arg, ... ) {
-	// Most cgame syscalls are rendering/sound calls that don't apply server-side.
-	// Return 0 (success/no-op) for everything.
 	return 0;
 }
 
@@ -1842,11 +2226,10 @@ void SV_SP_InitGameProgs( void ) {
 		Com_Error( ERR_FATAL, "SV_SP_InitGameProgs: efgamex86.dll missing GetGameAPI export" );
 	}
 
-	// The SP game DLL also contains cgame code (dllEntry/vmMain for client-side).
-	// The cgame's syscall function pointer is initialized to -1 (invalid).
-	// If we don't call dllEntry, any cgame function called during RunFrame
-	// will crash by calling through the -1 pointer.
-	// Initialize it with a stub syscall handler that returns 0 for everything.
+	// CRITICAL: Initialize the cgame's syscall pointer before calling
+	// GetGameAPI.  See SV_SP_CgameSyscallStub for detailed explanation.
+	// Without this, the server will crash during the first RunFrame that
+	// triggers any shared game/cgame code path.
 	{
 		void (*cgameDllEntry)( intptr_t (*syscallptr)( intptr_t, ... ) );
 		cgameDllEntry = (void (*)(intptr_t (*)(intptr_t, ...)))Sys_LoadFunction( gameLibrary, "dllEntry" );
@@ -1972,9 +2355,48 @@ void SV_SP_InitGameVM( void ) {
 ===============
 SV_SP_GameVmMain
 
-A fake vmMain entry point that dispatches VM_Call commands to the
-SP game_export_t function pointers. This allows all existing
-VM_Call(gvm, GAME_*, ...) sites in the engine to work unchanged.
+Translation layer between the Q3-style VM_Call interface and the SP
+game module's function pointer interface.
+
+The ioEF engine dispatches game commands via VM_Call(gvm, GAME_*, ...),
+which expects a vmMain(command, ...) entry point.  The SP game module
+has no vmMain -- it uses sp_game_export_t function pointers instead.
+This function acts as a "virtual vmMain" that receives GAME_* commands
+and routes them to the correct ge->* function pointer.
+
+Key argument translations per command:
+
+  GAME_INIT:
+    Handled entirely by SV_SP_InitGameVM (which calls ge->Init with the
+    correct SP-specific parameters).
+
+  GAME_CLIENT_CONNECT:
+    Q3 passes (clientNum, firstTime, isBot).  SP has no bots; the third
+    argument is replaced with sv_sp_savedGameJustLoaded so the game knows
+    whether to restore client state from a save.
+
+  GAME_CLIENT_BEGIN:
+    Q3 passes (clientNum) only.  SP additionally needs a usercmd_t* and
+    SavedGameJustLoaded_e.  We supply the client's lastUsercmd and the
+    current load type.  After ClientBegin, savedGameJustLoaded is reset
+    to eNO so subsequent frames don't re-trigger load logic.
+
+  GAME_CLIENT_THINK:
+    Q3 copies the usercmd via syscall; SP takes a usercmd_t* directly.
+    We pass a pointer to the client's lastUsercmd.
+
+  GAME_RUN_FRAME:
+    Syncs all entities before and after the frame.  The pre-sync ensures
+    engine traces during RunFrame see current data.  The post-sync
+    ensures the snapshot builder sees final post-frame state.
+
+  GAME_CLIENT_USERINFO_CHANGED, GAME_CLIENT_DISCONNECT, GAME_CLIENT_COMMAND,
+  GAME_CONSOLE_COMMAND:
+    Straight pass-through with no argument translation needed.
+
+  GAME_SHUTDOWN:
+    Calls ge->Shutdown.  Note: full cleanup (DLL unload, pointer reset)
+    is done by SV_SP_ShutdownGameProgs, not here.
 ===============
 */
 intptr_t QDECL SV_SP_GameVmMain( int command, ... ) {
@@ -1994,9 +2416,9 @@ intptr_t QDECL SV_SP_GameVmMain( int command, ... ) {
 
 	switch ( command ) {
 	case GAME_INIT:
-		// GAME_INIT is handled by SV_SP_InitGameVM, which is called
-		// from SV_InitGameVM. We just need to make sure entity data
-		// is wired up.
+		// Delegated to SV_SP_InitGameVM which calls ge->Init with the
+		// full set of SP-specific parameters (map name, entity string,
+		// timers, save-load state) that Q3's GAME_INIT doesn't provide.
 		SV_SP_InitGameVM();
 		return 0;
 
