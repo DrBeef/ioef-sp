@@ -19,11 +19,55 @@ along with Quake III Arena source code; if not, write to the Free Software
 Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 ===========================================================================
 */
-// cl_ui_sp.c -- bridge between ioEF engine and EF1 singleplayer UI module
-//
-// The EF1 SP UI module (efuix86.dll) exports GetUIAPI() which returns a
-// uiexport_t* function pointer table.  This file provides the translation
-// layer between the ioEF VM-style UI interface and the SP DLL interface.
+
+/*
+ * cl_ui_sp.c -- Singleplayer UI bridge for Elite Force 1
+ *
+ * OVERVIEW
+ * --------
+ * The ioEF engine communicates with UI modules through a Quake 3-style
+ * virtual machine (VM) interface: the engine calls vmMain(command, ...)
+ * and the module calls back via numbered syscalls.  The EF1 singleplayer
+ * UI module (efuix86.dll), however, uses a Quake 2-style "GetUIAPI"
+ * pattern -- it exports a single C function that returns a struct of
+ * function pointers, and the engine passes a matching struct of engine
+ * function pointers in the other direction.
+ *
+ * This file bridges between those two worlds:
+ *
+ *   1. It defines the two function pointer tables:
+ *        - sp_uiimport_t  (engine -> UI module, "imports")
+ *        - sp_uiexport_t  (UI module -> engine, "exports")
+ *
+ *   2. It provides thin wrapper functions for every import slot, adapting
+ *      ioEF engine APIs to the signatures the SP UI module expects.
+ *
+ *   3. It implements CL_SP_UIVmMain(), a fake vmMain dispatcher that the
+ *      engine's existing VM_Call(uivm, UI_*, ...) call sites invoke.
+ *      CL_SP_UIVmMain translates each UI_* command enum into the
+ *      corresponding sp_uiexport_t function pointer call.
+ *
+ *   4. It implements the SG_* (SaveGame) family of callbacks that the SP
+ *      UI module expects the engine to provide for load/save screen
+ *      thumbnails and save-slot metadata.
+ *
+ * LOADING SEQUENCE
+ * ----------------
+ *   CL_SP_InitUI()
+ *     -> Sys_LoadLibrary("efuix86.dll")
+ *     -> Sys_LoadFunction("GetUIAPI")   -- locate the DLL's entry point
+ *     -> GetUIAPI()                     -- receive sp_uiexport_t* back
+ *     (UI_Init is NOT called here; it happens later when the engine
+ *      issues VM_Call(uivm, UI_INIT), which routes through
+ *      CL_SP_UIVmMain -> ue->UI_Init.)
+ *
+ * RELATIONSHIP TO OTHER SP BRIDGE FILES
+ * --------------------------------------
+ *   sv_game_sp.c   -- Server-side bridge, loads efgamex86.dll via GetGameAPI
+ *   cl_cgame_sp.c  -- Client cgame bridge, shares the same DLL as sv_game_sp
+ *   cl_ui_sp.c     -- This file, loads a SEPARATE DLL (efuix86.dll) for menus
+ *   sp_types.h     -- Shared SP struct definitions used by all three bridges
+ */
 
 #ifdef ELITEFORCE
 
@@ -34,9 +78,38 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // SP UI module type definitions (from EF1 SP ui_public.h)
 // ============================================================================
 
+// Protocol version expected by the SP UI module.  If the DLL was compiled
+// against a different version, UI_Init will fail or misbehave.  The original
+// Ritual release used version 2; we match that here.
 #define SP_UI_API_VERSION	2
 
+/*
+ * sp_uiimport_t -- "engine imports" table passed TO the SP UI module.
+ *
+ * The engine fills every slot with a wrapper function that adapts the ioEF
+ * internal API to the calling convention the SP UI DLL expects.  This struct
+ * is handed to the DLL inside UI_Init(apiVersion, uiimport).  After that
+ * call, the DLL caches the pointer and calls back into the engine through
+ * these function pointers for the rest of its lifetime.
+ *
+ * Layout must match the original Ritual ui_public.h exactly -- the DLL was
+ * compiled against that header, and function pointers are resolved purely
+ * by their position in the struct (there is no name-based lookup).
+ *
+ * The functions fall into several groups:
+ *   - Console / Cvar access        (Printf through Cvar_InfoStringBuffer)
+ *   - Command buffer               (Argc, Argv, Cmd_ExecuteText, ...)
+ *   - Filesystem                   (FS_FOpenFile through FS_FreeFile)
+ *   - Renderer                     (R_RegisterModel through R_ScissorPic)
+ *   - Screen / screenshot helpers  (UpdateScreen, PrecacheScreenshot)
+ *   - Audio                        (S_StartLocalSound, S_RegisterSound, ...)
+ *   - Raw video drawing            (DrawStretchRaw -- for cinematic playback)
+ *   - Save-game support (SG_*)     (thumbnail, comment, and validation helpers)
+ *   - Key / input                  (Key_KeynumToStringBuf through Key_SetCatcher)
+ *   - Misc client state            (GetClipboardData, GetGlconfig, etc.)
+ */
 typedef struct {
+	// --- Console / Cvar ---
 	void		(*Printf)( const char *fmt, ... );
 	void		(*Error)( int level, const char *fmt, ... );
 	void		(*Cvar_Set)( const char *name, const char *value );
@@ -46,10 +119,14 @@ typedef struct {
 	void		(*Cvar_Reset)( const char *name );
 	void		(*Cvar_Create)( const char *var_name, const char *var_value, int flags );
 	void		(*Cvar_InfoStringBuffer)( int bit, char *buffer, int bufsize );
+
+	// --- Command buffer ---
 	int			(*Argc)( void );
 	void		(*Argv)( int n, char *buffer, int bufferLength );
 	void		(*Cmd_ExecuteText)( int exec_when, const char *text );
 	void		(*Cmd_TokenizeString)( const char *text );
+
+	// --- Filesystem ---
 	int			(*FS_FOpenFile)( const char *qpath, fileHandle_t *file, fsMode_t mode );
 	int			(*FS_Read)( void *buffer, int len, fileHandle_t f );
 	int			(*FS_Write)( const void *buffer, int len, fileHandle_t f );
@@ -57,6 +134,8 @@ typedef struct {
 	int			(*FS_GetFileList)( const char *path, const char *extension, char *listbuf, int bufsize );
 	int			(*FS_ReadFile)( const char *name, void **buf );
 	void		(*FS_FreeFile)( void *buf );
+
+	// --- Renderer ---
 	qhandle_t	(*R_RegisterModel)( const char *name );
 	qhandle_t	(*R_RegisterSkin)( const char *name );
 	qhandle_t	(*R_RegisterShader)( const char *name );
@@ -69,19 +148,34 @@ typedef struct {
 	void		(*R_SetColor)( const float *rgba );
 	void		(*R_DrawStretchPic)( float x, float y, float w, float h, float s1, float t1, float s2, float t2, qhandle_t hShader );
 	void		(*R_ScissorPic)( float x, float y, float w, float h, float s1, float t1, float s2, float t2, qhandle_t hShader );
+
+	// --- Screen helpers ---
 	void		(*UpdateScreen)( void );
 	void		(*PrecacheScreenshot)( void );
 	void		(*R_LerpTag)( orientation_t *tag, clipHandle_t mod, int startFrame, int endFrame, float frac, const char *tagName );
+
+	// --- Audio ---
 	void		(*S_StartLocalSound)( sfxHandle_t sfxHandle, int channelNum );
 	sfxHandle_t	(*S_RegisterSound)( const char *name );
 	void		(*S_StartLocalLoopingSound)( sfxHandle_t sfxHandle );
+
+	// --- Raw video / cinematic ---
 	void		(*DrawStretchRaw)( int x, int y, int w, int h, int cols, int rows, const byte *data, float fLightValue );
+
+	// --- Save-game support (SG_*) ---
+	// These callbacks let the SP UI's load/save screen retrieve thumbnails,
+	// comment strings, and validity flags for each save slot.  The original
+	// EF1 engine implemented a full save-game system (chunked binary files
+	// with COMM and SHOT blocks); our implementations here read those chunks
+	// from the save files stored in saves/*.sav within baseEF/.
 	qboolean	(*SG_GetSaveImage)( const char *psPathlessBaseName, void *pvAddress );
 	void *		(*SG_GetSaveGameComment)( const char *psPathlessBaseName );
 	qboolean	(*SG_ValidateForLoadSaveScreen)( const char *psPathlessBaseName );
 	qboolean	(*SG_GameAllowedToSaveHere)( qboolean inCamera );
 	void		(*SG_StoreSaveGameComment)( const char *sComment );
 	byte *		(*SCR_GetScreenshot)( qboolean * );
+
+	// --- Key / input ---
 	void		(*Key_KeynumToStringBuf)( int keynum, char *buf, int buflen );
 	void		(*Key_GetBindingBuf)( int keynum, char *buf, int buflen );
 	void		(*Key_SetBinding)( int keynum, const char *binding );
@@ -91,6 +185,8 @@ typedef struct {
 	void		(*Key_ClearStates)( void );
 	int			(*Key_GetCatcher)( void );
 	void		(*Key_SetCatcher)( int catcher );
+
+	// --- Misc client state ---
 	void		(*GetClipboardData)( char *buf, int bufsize );
 	void		(*GetGlconfig)( glconfig_t *config );
 	connstate_t	(*GetClientState)( void );
@@ -98,6 +194,19 @@ typedef struct {
 	int			(*Milliseconds)( void );
 } sp_uiimport_t;
 
+/*
+ * sp_uiexport_t -- "UI module exports" table returned BY the SP UI module.
+ *
+ * The DLL's GetUIAPI() entry point returns a pointer to a static instance
+ * of this struct.  Each slot is a function implemented inside the DLL that
+ * the engine can call.  CL_SP_UIVmMain dispatches to these pointers when
+ * the engine issues VM_Call(uivm, UI_*, ...).
+ *
+ * Note that the SP UI uses string-based menu names (UI_SetActiveMenu takes
+ * a "menuname" string like "mainMenu" or "ingameMenu") whereas the ioEF
+ * engine uses an integer enum (uiMenuCommand_t).  CL_SP_UIVmMain handles
+ * this translation in the UI_SET_ACTIVE_MENU case.
+ */
 typedef struct {
 	void		(*UI_Init)( int apiVersion, sp_uiimport_t *uiimport );
 	void		(*UI_Shutdown)( void );
@@ -117,33 +226,76 @@ typedef struct {
 // Module state
 // ============================================================================
 
-static sp_uiexport_t	*ue;
-static void				*uiLibrary;
-static sp_uiimport_t	uii;
+static sp_uiexport_t	*ue;			// Export table returned by the DLL's GetUIAPI()
+static void				*uiLibrary;		// Sys_LoadLibrary handle for efuix86.dll
+static sp_uiimport_t	uii;			// Import table we fill in and pass to UI_Init
 
-#define SP_SAVE_CHUNK_MAGIC          0x1234ABCDu
-#define SP_SAVE_CHUNK_COMM           0x434F4D4Du
-#define SP_SAVE_CHUNK_SHOT           0x53484F54u
+// ============================================================================
+// Save-game file format constants
+//
+// The original EF1 save format uses a simple chunked binary layout:
+//
+//   [chunk-header] [payload] [magic-trailer]
+//
+// Each chunk header is 12 bytes:
+//   4 bytes  chunk ID   (e.g. SP_SAVE_CHUNK_COMM, SP_SAVE_CHUNK_SHOT)
+//   4 bytes  payload length
+//   4 bytes  CRC-32 checksum of the payload
+//
+// After the payload, a 4-byte magic value (SP_SAVE_CHUNK_MAGIC) acts as
+// a sentinel to detect truncated or corrupt files.
+//
+// The two chunks we care about for the UI load/save screen:
+//   COMM  -- 128-byte comment string (map name, timestamp, etc.)
+//            Bytes 0..62 are the display string; bytes 64..127 hold
+//            a secondary sort key / metadata string.
+//   SHOT  -- 256x256 RGBA screenshot thumbnail (256 * 256 * 4 = 262144 bytes)
+// ============================================================================
+
+#define SP_SAVE_CHUNK_MAGIC          0x1234ABCDu   // End-of-chunk sentinel
+#define SP_SAVE_CHUNK_COMM           0x434F4D4Du   // "COMD" in little-endian
+#define SP_SAVE_CHUNK_SHOT           0x53484F54u   // "SHOT" in little-endian
 #define SP_SAVE_COMMENT_SIZE         128
-#define SP_SAVE_SORTINFO_OFFSET      64
+#define SP_SAVE_SORTINFO_OFFSET      64            // Secondary string starts at byte 64
 #define SP_SAVE_SHOT_SIZE            ( 256 * 256 * 4 )
 
-static byte		cl_sp_storedSaveComment[SP_SAVE_COMMENT_SIZE];
-static byte		cl_sp_loadedSaveComment[SP_SAVE_COMMENT_SIZE];
-static byte		cl_sp_saveScratch[SP_SAVE_SHOT_SIZE];
-static byte		cl_sp_cachedScreenshot[SP_SAVE_SHOT_SIZE];
-static qboolean	cl_sp_cachedScreenshotValid;
-static byte		*cl_sp_captureBuffer;
-static byte		*cl_sp_encodeBuffer;
+// Persistent buffers for save-game metadata and thumbnails.
+// These are static because the SP UI module expects the returned pointers
+// to remain valid across multiple calls (it does NOT copy the data).
+static byte		cl_sp_storedSaveComment[SP_SAVE_COMMENT_SIZE];  // Comment being written to a new save
+static byte		cl_sp_loadedSaveComment[SP_SAVE_COMMENT_SIZE];  // Comment read back from an existing save
+static byte		cl_sp_saveScratch[SP_SAVE_SHOT_SIZE];           // Scratch buffer for validation reads
+static byte		cl_sp_cachedScreenshot[SP_SAVE_SHOT_SIZE];      // 256x256 RGBA of the current frame
+static qboolean	cl_sp_cachedScreenshotValid;                    // Whether cachedScreenshot is populated
+
+// Dynamic capture buffers -- allocated once at the current resolution,
+// reused until the resolution changes or the module is shut down.
+static byte		*cl_sp_captureBuffer;   // Raw RGB framebuffer capture
+static byte		*cl_sp_encodeBuffer;    // Scratch for TakeVideoFrame encoding
 static int		cl_sp_captureWidth;
 static int		cl_sp_captureHeight;
 
+// Forward declarations
 static qboolean CL_SP_CaptureSaveScreenshot( void );
 const byte *CL_SP_GetStoredSaveComment( void );
 qboolean CL_SP_CopySaveScreenshot( byte *outRGBA, int outSize );
 
 // ============================================================================
 // Wrapper functions for sp_uiimport_t
+//
+// Each function below corresponds to one slot in the sp_uiimport_t table.
+// Most are trivial pass-throughs, but a few adapt between the SP UI module's
+// calling convention and the ioEF engine's internal APIs:
+//
+//   - Printf / Error: variadic wrappers (the SP DLL calls through a function
+//     pointer so we need to resolve the va_list on our side)
+//   - R_AddPolyToScene: SP version takes 3 args, engine takes 4 (num polys)
+//   - S_RegisterSound: SP version takes 1 arg, engine takes 2 (compressed flag)
+//   - DrawStretchRaw: SP has a fLightValue float, engine has client+dirty params
+//   - R_ScissorPic: not available in ioEF renderer, mapped to DrawStretchPic
+//   - S_StartLocalLoopingSound: no equivalent in ioEF client, stubbed out
+//   - Key_SetCatcher: preserves KEYCATCH_CONSOLE to prevent UI from closing it
+//   - GetClientState: SP returns connstate_t directly, not via a struct
 // ============================================================================
 
 static void CL_SP_UI_Printf( const char *fmt, ... ) {
@@ -330,6 +482,22 @@ static void CL_SP_UI_DrawStretchRaw( int x, int y, int w, int h,
 
 // ============================================================================
 // Savegame bridge helpers
+//
+// The original EF1 engine had a full save/load subsystem. The SP UI module
+// calls into the engine's SG_* functions to:
+//
+//   SG_GetSaveImage          -- Read the 256x256 RGBA thumbnail from a .sav file
+//   SG_GetSaveGameComment    -- Read the comment/description string from a .sav
+//   SG_ValidateForLoadSaveScreen -- Check that a .sav file is readable/valid
+//   SG_GameAllowedToSaveHere -- Ask the game module if saving is permitted now
+//   SG_StoreSaveGameComment  -- Store a comment string for the NEXT save operation
+//   SCR_GetScreenshot        -- Get the current frame as a 256x256 RGBA thumbnail
+//
+// Our implementations read the chunked save format (COMM + SHOT chunks)
+// from saves/*.sav files for the load screen, and capture live framebuffer
+// data for the save screen thumbnail.  The actual save-game WRITING is
+// handled elsewhere (in the server-side SP bridge); this file only provides
+// the read-back and screenshot capture that the UI needs.
 // ============================================================================
 
 static void CL_SP_FreeCaptureBuffers( void ) {
@@ -931,6 +1099,17 @@ CL_SP_UIVmMain
 A fake vmMain entry point that dispatches VM_Call commands to the
 SP uiexport_t function pointers.  This allows all existing
 VM_Call(uivm, UI_*, ...) sites in the engine to work unchanged.
+
+The ioEF engine creates a "fake" vm_t for the SP UI (with vm->isFake
+set to true in vm.c).  When VM_Call is invoked on a fake VM, it calls
+the vmMain function pointer instead of interpreting QVM bytecode.
+That function pointer is set to CL_SP_UIVmMain during CL_InitUI().
+
+Each case in the switch below translates a UI_* command enum (defined
+in ui_public.h, shared by both MP and SP code paths) into the
+corresponding sp_uiexport_t function pointer call.  The arguments are
+extracted from the variadic parameter list in the same order that
+VM_Call passes them.
 ===============
 */
 intptr_t QDECL CL_SP_UIVmMain( int command, ... ) {
@@ -951,14 +1130,26 @@ intptr_t QDECL CL_SP_UIVmMain( int command, ... ) {
 	case UI_GETAPIVERSION:
 		return UI_API_VERSION;
 
+	// UI_INIT: Called once during CL_InitUI() to initialize the SP UI module.
+	// We pass SP_UI_API_VERSION (2) and our filled-in import table so the DLL
+	// can cache the engine function pointers and set up its internal state
+	// (loading menu assets, registering cvars, etc.).
 	case UI_INIT:
 		ue->UI_Init( SP_UI_API_VERSION, &uii );
 		return 0;
 
+	// UI_SHUTDOWN: Called during CL_ShutdownUI() when the client is quitting
+	// or restarting.  The DLL should free all resources it allocated during
+	// UI_Init.  Note: the DLL itself is unloaded separately in CL_SP_ShutdownUI
+	// after this call returns.
 	case UI_SHUTDOWN:
 		ue->UI_Shutdown();
 		return 0;
 
+	// UI_KEY_EVENT: Dispatched when the engine receives a key press/release
+	// while the UI has key focus (KEYCATCH_UI is set).  arg0 is the Q3
+	// keynum (K_* constants from keycodes.h).  The SP UI module handles
+	// menu navigation, text input, and binding capture through this path.
 	case UI_KEY_EVENT:
 		ue->UI_KeyEvent( arg0 );
 		return 0;

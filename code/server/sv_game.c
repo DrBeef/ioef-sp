@@ -971,13 +971,23 @@ void SV_InitGameProgs( void ) {
 	extern int	bot_enable;
 
 #ifdef ELITEFORCE
-	// Check if we should load the SP game module
+	/*
+	 * SP game module loading path.
+	 *
+	 * When sp_game is set, we load the EF1 singleplayer game DLL
+	 * (efgamex86.dll) via GetGameAPI instead of the normal Q3 VM
+	 * loader.  A "fake VM" wrapper is created so that all existing
+	 * VM_Call(gvm, GAME_*, ...) call sites in the engine continue
+	 * to work — the fake VM simply dispatches to SV_SP_GameVmMain
+	 * which translates to the SP game_export_t function pointers.
+	 *
+	 * sv_pure is forced to 0 because the SP data files don't pass
+	 * the pure server checksum validation (designed for MP anti-cheat).
+	 */
 	if ( Cvar_VariableIntegerValue( "sp_game" ) ) {
 		bot_enable = 0;
-		// SP mode doesn't need pure server checks
 		Cvar_Set( "sv_pure", "0" );
 		SV_SP_InitGameProgs();
-		// Create a minimal VM wrapper so existing VM_Call sites work
 		gvm = VM_CreateFakeWithSyscall( "qagame_sp", SV_SP_GameVmMain, SV_GameSystemCalls );
 		if ( !gvm ) {
 			Com_Error( ERR_FATAL, "VM_CreateFake for SP game failed" );

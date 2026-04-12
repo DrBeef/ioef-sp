@@ -147,7 +147,14 @@ typedef struct {
 
 	// extra sprite information
 #ifdef ELITEFORCE
-	// Keep flat radius/rotation for compatibility with Q3-style code
+	/*
+	 * EF layout: radius and rotation are flat fields BEFORE the union.
+	 * The SP game DLL's refEntity_t ends here (no union), while ioEF's
+	 * MP cgame uses the union for sprite/line/bezier/cylinder types.
+	 * Keeping radius/rotation at the same offset as the SP DLL ensures
+	 * ABI compatibility when the SP cgame passes refEntity_t pointers
+	 * across the DLL boundary.
+	 */
 	float		radius;
 	float		rotation;
 	union
@@ -280,6 +287,13 @@ typedef struct {
 	qboolean				textureEnvAddAvailable;
 #ifdef ELITEFORCE
 	qboolean				textureFilterAnisotropicAvailable;
+	/*
+	 * The SP game DLL's glconfig_t includes clampToEdgeAvailable here.
+	 * Without this field, vidWidth/vidHeight (and everything after) would
+	 * be read at a 4-byte offset by the SP cgame, causing the viewport
+	 * to be set up with garbage values.  The ioEF MP cgame doesn't use
+	 * this field, so it's harmless to include.
+	 */
 	qboolean				clampToEdgeAvailable;
 #endif
 

@@ -12,8 +12,21 @@
 /* #undef const */
 /* #undef CHAR_IS_UNSIGNED */
 
-/* Define "boolean" as unsigned char, not int, on Windows systems.
-   Must be outside JPEG_INTERNALS guard so both library and callers agree. */
+/*
+ * Define "boolean" as unsigned char, not int, on Windows systems.
+ *
+ * IMPORTANT: This block must be OUTSIDE the #ifdef JPEG_INTERNALS guard.
+ * The JPEG library .c files define JPEG_INTERNALS, but the renderer code
+ * that calls JPEG functions (tr_image_jpg.c) does not.  If the boolean
+ * typedef is only visible to the library, the two sides disagree on
+ * struct sizes — the library compiles jpeg_decompress_struct with
+ * 1-byte booleans while the caller sees 4-byte int booleans, causing
+ * a 40-byte size mismatch that prevents any JPEG texture from loading.
+ *
+ * The original jconfig.h had this inside JPEG_INTERNALS which worked
+ * when the library and caller were in separate compilation units with
+ * matching configs, but breaks in our renderer DLL build.
+ */
 #ifdef _WIN32
 #ifndef __RPCNDR_H__		/* don't conflict if rpcndr.h already read */
 typedef unsigned char boolean;

@@ -19,14 +19,73 @@ along with Quake III Arena source code; if not, write to the Free Software
 Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 ===========================================================================
 */
-// cl_cgame_sp.c -- syscall dispatcher for the EF1 singleplayer cgame module
+/*
+===========================================================================
+cl_cgame_sp.c -- syscall dispatcher for the EF1 singleplayer cgame module
+
+OVERVIEW
+--------
+This file implements the syscall dispatcher that bridges between the ioEF
+engine and the precompiled EF1 singleplayer cgame DLL (efcgamex86.dll).
+
+When the SP cgame module calls trap_* functions, those compile down to a
+syscall with a numeric ID.  The DLL's vmMain calls into the engine with
+an integer identifying which engine service it wants, and this dispatcher
+maps that integer to the appropriate engine function.
+
+WHY A SEPARATE DISPATCHER?
+---------------------------
+The SP cgame uses a completely different syscall numbering scheme from
+ioEF's multiplayer cgame.  The numbers diverge because the SP module
+includes several subsystems that don't exist in multiplayer:
+
+  1. Force Feedback (FF) -- The original Ritual engine supported
+     DirectInput force-feedback joysticks.  The SP cgame calls
+     FF_StartFX, FF_EnsureFX, FF_StopFX, FF_StopAllFX.  These four
+     syscalls (34-37) are inserted between the sound and renderer
+     blocks, pushing all renderer syscall numbers up by 4 compared
+     to ioEF MP.
+
+  2. Extra Renderer Calls -- The SP cgame uses R_GetLighting (45),
+     R_DrawScreenShot (51), R_DrawRotatePic (54), and R_Scissor (55).
+     These shift later syscall numbers further.
+
+  3. Ambient Sound System -- The SP campaign uses a sophisticated
+     ambient sound system (S_UpdateAmbientSet, S_AddLocalSet,
+     AS_ParseSets, AS_AddEntry, AS_GetBModelSound, S_GetSampleLength)
+     at syscalls 65-70, appended after the main block.
+
+The net effect is that almost every syscall number >= 34 differs between
+SP and MP.  Rather than trying to remap numbers at the edges, we use a
+clean separate dispatch table.
+
+SNAPSHOT ARCHITECTURE NOTE
+--------------------------
+The most complex syscall here is SPCG_GETSNAPSHOT.  See its extensive
+inline comments for why we bypass ioEF's delta-compression snapshot
+system and instead build SP-format snapshots directly from the game
+module's live data.
+===========================================================================
+*/
 
 #ifdef ELITEFORCE
 
 #include "client.h"
 #include "../qcommon/sp_types.h"
 
-// From sv_game_sp.c — available because SP is always a local server
+/*
+ * These functions are defined in sv_game_sp.c (the server-side SP bridge).
+ * They are safe to call from the client because SP is always a local game --
+ * the server and client run in the same process, sharing the same address
+ * space.  There is never a remote SP server.
+ *
+ * SV_SP_GetRawPlayerState() returns a pointer directly into the SP game
+ * module's gclient_t struct (which begins with sp_playerState_t).  We
+ * memcpy from this pointer into the SP snapshot's ps field.
+ *
+ * SV_SP_GetRawEntityState() returns a pointer to the sp_entityState_t at
+ * the start of a specific gentity_t slot in the game module's entity array.
+ */
 extern void *SV_SP_GetRawPlayerState( void );
 extern sp_entityState_t *SV_SP_GetRawEntityState( int entNum );
 

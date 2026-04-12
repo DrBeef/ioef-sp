@@ -21,9 +21,60 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 // sv_game_sp.c -- bridge between ioEF engine and EF1 singleplayer game module
 //
-// The EF1 SP game module uses a Q2-style GetGameAPI interface with function
-// pointer structs, rather than the Q3-style VM (dllEntry/vmMain) interface.
-// This file provides the translation layer.
+// ============================================================================
+// Architecture overview
+// ============================================================================
+//
+// Quake 3 and its derivatives use a VM-based game module interface: the engine
+// calls vmMain(command, ...) to dispatch into the module, and the module calls
+// back through a syscall function pointer set via dllEntry().  This is the
+// "Q3-style" interface.
+//
+// The EF1 singleplayer game module (efgamex86.dll) predates this convention
+// and instead uses the older "Q2-style" GetGameAPI pattern.  The engine fills
+// in a struct of function pointers (sp_game_import_t) representing services
+// it provides, passes a pointer to the DLL, and receives back a matching
+// struct (sp_game_export_t) of function pointers the DLL exports.  All
+// subsequent communication happens through these two tables -- there is no
+// vmMain, no syscall numbering, and no shared-memory VM sandbox.
+//
+// A key complication: the EF1 SP DLL is a *combined* game+cgame module.
+// It exports both GetGameAPI (server-side game logic) AND the Q3-style
+// dllEntry/vmMain pair (client-side cgame rendering).  This means a single
+// loaded DLL image serves double duty.  On the server side we call
+// GetGameAPI; on the client side, cl_cgame_sp.c calls dllEntry/vmMain.
+// Because both sides share global state within the DLL, we must call
+// dllEntry with a stub syscall handler during server init (see
+// SV_SP_CgameSyscallStub) -- otherwise the cgame's syscall pointer is left
+// at its default uninitialized value (-1 / 0xFFFFFFFF), and any cgame code
+// that happens to execute during a server-side RunFrame will dereference
+// that pointer and crash.
+//
+// This file provides the full translation layer:
+//
+//   1. Shadow entity array -- The SP game's gentity_t uses sp_entityState_t
+//      (with extra fields like modelindex3, legsAnimTimer, scale, pushVec),
+//      but the engine's snapshot builder and collision code expect the ioEF
+//      sharedEntity_t layout.  We maintain a parallel array of sharedEntity_t
+//      and sync field-by-field before/after engine calls.
+//
+//   2. PlayerState translation -- The SP playerState_t has a different field
+//      layout (different array sizes, extra fields, missing fields).  A
+//      translated copy is maintained for the engine's snapshot builder.
+//
+//   3. GetGameAPI wrapper functions -- Each function pointer in the
+//      sp_game_import_t is backed by a thin wrapper that bridges to the
+//      engine, handling entity pointer translation where needed.
+//
+//   4. Save/load system -- Implements a chunk-based binary save format with
+//      integrity checking, replacing the original EF1 save code that relied
+//      on engine internals we don't have.
+//
+//   5. GAME_* command dispatch -- SV_SP_GameVmMain translates VM_Call
+//      commands (GAME_INIT, GAME_RUN_FRAME, etc.) into the corresponding
+//      sp_game_export_t function pointer calls, handling argument
+//      differences between the Q3 and SP calling conventions.
+// ============================================================================
 
 #ifdef ELITEFORCE
 
@@ -40,8 +91,16 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // The remaining types below are server-side only (game import/export tables).
 // ============================================================================
 
+// API version that the engine expects from the SP game DLL.  If the DLL
+// returns a different version from ge->apiversion, loading is aborted.
+// EF1 SP shipped at version 6; there is no known version 5 or 7.
 #define SP_GAME_API_VERSION	6
 
+// Enum used by the save/load system to indicate how a game was loaded.
+// eNO = fresh map start (no save loaded), eFULL = full save/load,
+// eAUTO = autosave restore (level transition).  Passed to ge->Init,
+// ge->ClientConnect, and ge->ClientBegin so the game module knows
+// whether to restore entity state or start fresh.
 typedef enum {
 	eNO = 0,
 	eFULL,
@@ -50,6 +109,16 @@ typedef enum {
 
 //
 // functions provided by the engine to the SP game module
+//
+// This is the Q2-style "game import" table.  The engine fills in every
+// function pointer before calling GetGameAPI.  The SP game module stores
+// a copy of this struct and calls through these pointers for all engine
+// services (printing, filesystem, collision, entity linking, etc.).
+//
+// Each pointer is backed by a thin SV_SP_* wrapper function defined later
+// in this file.  Wrappers that deal with entities (SetBrushModel, linkentity,
+// EntitiesInBox, etc.) must translate between sp_gentity_t pointers and
+// the engine's sharedEntity_t shadow array.
 //
 typedef struct {
 	void	(*Printf)( const char *fmt, ... );
@@ -69,6 +138,9 @@ typedef struct {
 	int	(*FS_ReadFile)( const char *name, void **buf );
 	void	(*FS_FreeFile)( void *buf );
 	int	(*FS_GetFileList)( const char *path, const char *extension, char *listbuf, int bufsize );
+	// Save/load callbacks: the game module writes and reads its own state
+	// through these chunk-based I/O functions.  Each chunk is tagged with
+	// a 4-byte ID (chid) so the loader can identify and validate blocks.
 	qboolean	(*AppendToSaveGame)(unsigned long chid, void *data, int length);
 	int		(*ReadFromSaveGame)(unsigned long chid, void *pvAddress, int iLength, void **ppvAddressPtr);
 	int		(*ReadFromSaveGameOptional)(unsigned long chid, void *pvAddress, int iLength, void **ppvAddressPtr);
@@ -91,6 +163,11 @@ typedef struct {
 	void	(*unlinkentity)( sp_gentity_t *ent );
 	int	(*EntitiesInBox)( const vec3_t mins, const vec3_t maxs, sp_gentity_t **list, int maxcount );
 	qboolean	(*EntityContact)( const vec3_t mins, const vec3_t maxs, const sp_gentity_t *ent );
+	// S_Override is a pointer to an int array the SP game uses to override
+	// sound indices.  In the original EF1 engine this pointed into the sound
+	// system's internal tables.  We provide a dummy array since ioEF's sound
+	// system doesn't support this mechanism; the game reads/writes it but the
+	// values have no effect.
 	int	*S_Override;
 	void	*(*Malloc)( int bytes );
 	void	(*Free)( void *buf );
@@ -98,6 +175,20 @@ typedef struct {
 
 //
 // functions exported by the SP game module
+//
+// Returned by GetGameAPI.  This is the Q2-style "game export" table.
+// The engine calls these function pointers to drive the game logic.
+//
+// Note the signature differences from the Q3 VM interface:
+//   - Init takes the map name, entity string, timers, and save-load state
+//     directly as parameters (Q3 passes these through syscalls).
+//   - ClientConnect/ClientBegin take a SavedGameJustLoaded_e instead of
+//     the Q3 isBot flag -- SP has no bots, but needs to know if a save
+//     was just loaded so it can skip spawn logic.
+//   - ClientThink takes a usercmd_t* directly (Q3 copies it via syscall).
+//   - WriteLevel/ReadLevel are the game's save/load entry points.
+//   - gentities/gentitySize/num_entities are direct data pointers rather
+//     than being communicated via GAME_INIT return values.
 //
 typedef struct {
 	int		apiversion;
@@ -114,6 +205,10 @@ typedef struct {
 	void		(*ClientThink)( int clientNum, usercmd_t *cmd );
 	void		(*RunFrame)( int levelTime );
 	qboolean	(*ConsoleCommand)( void );
+	// The game module sets these after allocating its entity array during Init.
+	// gentities points into the game's own heap; gentitySize is the stride
+	// (sizeof the game's full gentity_t, which is much larger than sp_gentity_t
+	// since it includes private game fields after the engine-visible portion).
 	struct sp_gentity_s	*gentities;
 	int		gentitySize;
 	int		num_entities;
@@ -121,10 +216,47 @@ typedef struct {
 
 // sp_playerState_t and sp_entityState_t are defined in sp_types.h
 
-// Shadow playerState_t in ioEF layout for snapshot building
+// ============================================================================
+// PlayerState translation
+//
+// The engine's snapshot builder (SV_BuildClientSnapshot) reads playerState_t
+// fields at compile-time offsets.  The SP game module's playerState
+// (sp_playerState_t) has a different layout: different field order after
+// gravity, different array sizes (ammo[4] vs ammo[16]), extra fields
+// (leanofs, friction, borgAdaptHits, pushVec, etc.), and missing fields
+// (introTime, damageShieldCount, entityEventSequence).
+//
+// If we pointed sv.gameClients directly at the SP game's raw playerState
+// data, the engine would read garbage -- every field after 'gravity' is at
+// a different offset, so clientNum, weapon, origin, viewheight, etc. would
+// all be wrong.  The snapshot builder would produce corrupt snapshots, the
+// client would render the player at the wrong position, and PVS culling
+// (which reads ps->origin and ps->clientNum) would malfunction.
+//
+// Solution: maintain a single static playerState_t in ioEF layout and
+// translate field-by-field from the SP data before each snapshot.  We
+// cannot use memcpy because the structs differ in size and field offsets.
+// ============================================================================
 static playerState_t sv_sp_playerState;
 
-// Sync SP playerState to ioEF layout
+/*
+===============
+SV_SP_SyncPlayerState
+
+Translates the SP game module's playerState (sp_playerState_t) into the
+engine's playerState_t layout.  Called before every snapshot build so the
+engine reads correct values for origin, angles, clientNum, weapon, etc.
+
+The SP playerState has several layout differences:
+  - legsAnimTimer/torsoAnimTimer map to legsTimer/torsoTimer
+  - ammo[4] (SP MAX_AMMO) must be copied into ammo[16] (ioEF MAX_WEAPONS)
+    with the remaining slots zeroed
+  - Fields like leanofs, friction, scale, borgAdaptHits, pushVec have no
+    ioEF equivalent and are silently dropped
+  - Fields like introTime, damageShieldCount, entityEventSequence have no
+    SP equivalent and are left at zero
+===============
+*/
 static void SV_SP_SyncPlayerState( void *sp_client ) {
 	sp_playerState_t *sp_ps = (sp_playerState_t *)sp_client;
 	playerState_t *ps = &sv_sp_playerState;
@@ -171,7 +303,10 @@ static void SV_SP_SyncPlayerState( void *sp_client ) {
 	memcpy( ps->stats, sp_ps->stats, sizeof( ps->stats ) );
 	memcpy( ps->persistant, sp_ps->persistant, sizeof( ps->persistant ) );
 	memcpy( ps->powerups, sp_ps->powerups, sizeof( ps->powerups ) );
-	// SP ammo is [4], ioEF ammo is [MAX_WEAPONS=16]; only copy the SP portion
+	// SP ammo array is [4] (MAX_AMMO), ioEF ammo is [16] (MAX_WEAPONS).
+	// Zero the full destination first, then copy the 4 SP slots.  The
+	// remaining 12 slots stay zero -- they correspond to weapon types
+	// that don't exist in SP.
 	memset( ps->ammo, 0, sizeof( ps->ammo ) );
 	memcpy( ps->ammo, sp_ps->ammo, sizeof( sp_ps->ammo ) );
 	ps->ping            = sp_ps->ping;
@@ -181,28 +316,72 @@ static void SV_SP_SyncPlayerState( void *sp_client ) {
 // Module state
 // ============================================================================
 
-#define SP_SAVE_CHUNK_MAGIC          0x1234ABCDu
-#define SP_SAVE_CHUNK_COMM           0x434F4D4Du
-#define SP_SAVE_CHUNK_SHOT           0x53484F54u
-#define SP_SAVE_CHUNK_MPCM           0x4D50434Du
-#define SP_SAVE_CHUNK_GAME           0x47414D45u
-#define SP_SAVE_CHUNK_CVCN           0x4356434Eu
-#define SP_SAVE_CHUNK_CVAR           0x43564152u
-#define SP_SAVE_CHUNK_VALU           0x56414C55u
-#define SP_SAVE_CHUNK_TIME           0x54494D45u
-#define SP_SAVE_CHUNK_TIMR           0x54494D52u
-#define SP_SAVE_CHUNK_CSCN           0x4353434Eu
-#define SP_SAVE_CHUNK_CSIN           0x4353494Eu
-#define SP_SAVE_CHUNK_CSDA           0x43534441u
-#define SP_SAVE_CHUNK_CVSV           0x43565356u
-#define SP_SAVE_CHUNK_AMMO           0x414D4D4Fu
-#define SP_SAVE_CHUNK_ADPT           0x41445054u
-#define SP_SAVE_COMMENT_SIZE         128
-#define SP_SAVE_SORTINFO_OFFSET      64
-#define SP_SAVE_SHOT_SIZE            ( 256 * 256 * 4 )
-#define SP_SAVE_MAP_SIZE             1024
-#define SP_SAVE_CVAR_SIZE            1024
+// ============================================================================
+// Save file format
+//
+// Save files use a simple chunk-based binary format.  Each chunk is:
+//
+//   [4 bytes]  chunk ID   (one of the SP_SAVE_CHUNK_* constants)
+//   [4 bytes]  data length in bytes
+//   [4 bytes]  checksum   (Com_BlockChecksum of the data, or 0 if length==0)
+//   [N bytes]  chunk data (N == length)
+//   [4 bytes]  magic sentinel (SP_SAVE_CHUNK_MAGIC = 0x1234ABCD)
+//
+// The trailing magic value acts as a frame marker -- if it's missing or
+// wrong, the chunk is considered corrupt.  All multi-byte values are
+// stored in little-endian format.
+//
+// A complete save file is written in this order:
+//   COMM  - human-readable comment (display text + sort key, 128 bytes)
+//   SHOT  - screenshot thumbnail (256x256 RGBA, 262144 bytes)
+//   MPCM  - map name string (1024 bytes, null-padded)
+//   CVCN  - count of archived cvars (int)
+//     CVAR/VALU pairs (one pair per archived cvar)
+//   GAME  - autosave flag (int: 0 = full save, 1 = autosave)
+//   [if autosave:]
+//     CVSV  - "playersave" cvar value
+//     AMMO  - "playerammoN" cvar values (4 chunks, one per ammo slot)
+//     ADPT  - "borgadaptN" cvar values (32 chunks, one per weapon slot)
+//   TIME  - sv.time
+//   TIMR  - svs.time
+//   CSCN  - count of configstrings
+//     CSIN/CSDA pairs (index + data, one pair per configstring)
+//   [game module level data, written by ge->WriteLevel]
+//
+// The chunk IDs are ASCII FourCC codes (e.g., 0x434F4D4D = "COMM").
+// ============================================================================
 
+#define SP_SAVE_CHUNK_MAGIC          0x1234ABCDu  // Sentinel written after every chunk's data
+#define SP_SAVE_CHUNK_COMM           0x434F4D4Du  // "COMM" - save comment / display text
+#define SP_SAVE_CHUNK_SHOT           0x53484F54u  // "SHOT" - screenshot thumbnail (256x256 RGBA)
+#define SP_SAVE_CHUNK_MPCM           0x4D50434Du  // "MPCM" - map name (null-padded to 1024)
+#define SP_SAVE_CHUNK_GAME           0x47414D45u  // "GAME" - autosave flag (0=full, 1=auto)
+#define SP_SAVE_CHUNK_CVCN           0x4356434Eu  // "CVCN" - archived cvar count
+#define SP_SAVE_CHUNK_CVAR           0x43564152u  // "CVAR" - cvar name (null-terminated string)
+#define SP_SAVE_CHUNK_VALU           0x56414C55u  // "VALU" - cvar value (null-terminated string)
+#define SP_SAVE_CHUNK_TIME           0x54494D45u  // "TIME" - sv.time (level time in ms)
+#define SP_SAVE_CHUNK_TIMR           0x54494D52u  // "TIMR" - svs.time (server real time in ms)
+#define SP_SAVE_CHUNK_CSCN           0x4353434Eu  // "CSCN" - configstring count
+#define SP_SAVE_CHUNK_CSIN           0x4353494Eu  // "CSIN" - configstring index
+#define SP_SAVE_CHUNK_CSDA           0x43534441u  // "CSDA" - configstring data (string)
+#define SP_SAVE_CHUNK_CVSV           0x43565356u  // "CVSV" - "playersave" cvar (autosave only)
+#define SP_SAVE_CHUNK_AMMO           0x414D4D4Fu  // "AMMO" - "playerammoN" cvar (autosave only)
+#define SP_SAVE_CHUNK_ADPT           0x41445054u  // "ADPT" - "borgadaptN" cvar (autosave only)
+#define SP_SAVE_COMMENT_SIZE         128          // Total size of comment block in bytes
+// The 128-byte comment block is split into two 64-byte halves:
+// bytes [0..63]  = display text (shown in the save/load UI)
+// bytes [64..127] = sort key (date + map, for chronological ordering)
+#define SP_SAVE_SORTINFO_OFFSET      64
+#define SP_SAVE_SHOT_SIZE            ( 256 * 256 * 4 )  // 256x256 pixels, 4 bytes/pixel (RGBA)
+#define SP_SAVE_MAP_SIZE             1024                // Fixed-size map name field
+#define SP_SAVE_CVAR_SIZE            1024                // Max cvar value length in save files
+
+// State for an open save file stream (read or write).
+// We maintain separate read and write streams so that a save-during-load
+// (e.g., autosave on level transition) doesn't clobber the read state.
+// The 'failed' flag is sticky -- once set, all subsequent operations on
+// the stream are no-ops, allowing callers to chain writes without
+// checking every return value (they check 'failed' at the end).
 typedef struct {
 	fileHandle_t	file;
 	qboolean		active;
@@ -210,32 +389,80 @@ typedef struct {
 	char			qpath[MAX_QPATH];
 } sv_sp_save_stream_t;
 
-// game_export_t pointer returned by the SP game module
+// Pointer to the sp_game_export_t returned by GetGameAPI.  NULL when no SP
+// game module is loaded.  Also serves as the primary "SP mode active" flag
+// (see SV_SP_IsActive).
 static sp_game_export_t	*ge;
 
-// DLL handle for the SP game module
+// OS-level handle to the loaded efgamex86.dll.  Kept open for the duration
+// of the game so that the client side (cl_cgame_sp.c) can load cgame
+// symbols from the same DLL image without reopening it.
 static void		*gameLibrary;
 
-// Track whether entity data has been located in the engine
+// Set to qtrue once we've wired up sv.gentities / sv.gameClients.
+// Cleared on shutdown and re-set lazily during the first frame, because
+// ge->gentities isn't populated until partway through ge->Init (the game
+// module allocates its entity array during initialization).
 static qboolean entityDataLocated;
 
-// Shadow entity array: the engine reads sharedEntity_t layout, but the SP
-// game's gentity_t has a different layout.  We sync fields between the two
-// before and after every engine call that touches entities.
+// ============================================================================
+// Shadow entity array
+//
+// The ioEF engine's core systems (SV_LinkEntity, SV_BuildClientSnapshot,
+// SV_Trace, SV_AreaEntities) all expect entities in sharedEntity_t layout.
+// The SP game module uses sp_gentity_t, which embeds sp_entityState_t -- a
+// struct with extra fields (modelindex3, legsAnimTimer, torsoAnimTimer,
+// scale, pushVec) that shift all subsequent field offsets.
+//
+// We cannot simply cast sp_gentity_t* to sharedEntity_t* because the
+// field offsets diverge after modelindex2.  A memcpy is also wrong because
+// the structs are different sizes and have fields at different positions.
+//
+// Instead, we maintain a parallel "shadow" array of sharedEntity_t and
+// copy fields one-by-one between the two representations:
+//   SV_SP_SyncToShared  -- sp_gentity_t -> sharedEntity_t (before engine calls)
+//   SV_SP_SyncFromShared -- sharedEntity_t -> sp_gentity_t (after engine calls)
+//
+// The engine reads/writes only the shadow array.  The SP game module
+// reads/writes only its own array.  The sync functions bridge the gap.
+// ============================================================================
 #define SP_MAX_GENTITIES 1024
 static sharedEntity_t sv_sp_entities[SP_MAX_GENTITIES];
-static sv_sp_save_stream_t sv_sp_saveWrite;
-static sv_sp_save_stream_t sv_sp_saveRead;
-static SavedGameJustLoaded_e sv_sp_savedGameJustLoaded;
-static SavedGameJustLoaded_e sv_sp_pendingLoadType;
-static char sv_sp_pendingLoadQPath[MAX_QPATH];
-static char sv_sp_pendingLoadMap[MAX_QPATH];
+
+static sv_sp_save_stream_t sv_sp_saveWrite;       // Active save-write stream
+static sv_sp_save_stream_t sv_sp_saveRead;        // Active save-read stream
+static SavedGameJustLoaded_e sv_sp_savedGameJustLoaded;  // Current load type for ClientConnect/Begin
+static SavedGameJustLoaded_e sv_sp_pendingLoadType;      // Load type for a pending save restore
+static char sv_sp_pendingLoadQPath[MAX_QPATH];    // Qpath of save file to load after map restart
+static char sv_sp_pendingLoadMap[MAX_QPATH];      // Map name from pending save file
 
 extern const byte *CL_SP_GetStoredSaveComment( void );
 extern qboolean CL_SP_CopySaveScreenshot( byte *outRGBA, int outSize );
 extern cvar_t *cvar_vars;
 qboolean SV_SP_IsActive( void );
 
+/*
+===============
+SV_SP_SyncToShared
+
+Copies entity state from the SP game module's sp_gentity_t into the
+engine's shadow sharedEntity_t array.  Called before any engine operation
+that reads entity data (traces, linking, snapshot building, etc.).
+
+Field-by-field copy is required because sp_entityState_t and entityState_t
+diverge after modelindex2.  The SP struct inserts modelindex3 (used for
+the third-person weapon model in SP), which shifts clientNum, frame, and
+everything after.  Later in the struct, legsAnimTimer, torsoAnimTimer,
+scale, and pushVec are SP-specific fields with no ioEF equivalent.
+
+The entityShared_t portion (linked, svFlags, mins/maxs, etc.) also needs
+manual translation because sp_gentity_t stores these as flat fields
+rather than in a nested 'r' sub-struct.
+
+The owner pointer is translated to an entity number (ownerNum) since the
+engine works with entity numbers, not game-side pointers.
+===============
+*/
 static void SV_SP_SyncToShared( sp_gentity_t *sp_ent ) {
 	int num = sp_ent->s.number;
 	sharedEntity_t *se;
@@ -248,7 +475,9 @@ static void SV_SP_SyncToShared( sp_gentity_t *sp_ent ) {
 	dst = &se->s;
 
 	// Translate sp_entityState_t -> ioEF entityState_t field by field.
-	// Fields before modelindex3 are at identical offsets and can be bulk-copied.
+	// Fields from 'number' through 'modelindex2' happen to be at the same
+	// offsets in both structs, but we copy them individually anyway for
+	// clarity and safety (the compiler will optimize sequential stores).
 	dst->number          = src->number;
 	dst->eType           = src->eType;
 	dst->eFlags          = src->eFlags;

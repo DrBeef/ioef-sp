@@ -760,13 +760,36 @@ vm_t *VM_CreateFake( const char *module, intptr_t (QDECL *entryPoint)( int callN
 	return VM_CreateFakeWithSyscall( module, entryPoint, NULL );
 }
 
+/*
+===============
+VM_CreateFakeWithSyscall
+
+Creates a "fake" vm_t that wraps a pair of function pointers rather
+than a real DLL or QVM.  This lets code that was written for the Q3
+VM_Call / syscall pattern (the entire engine) work unchanged with
+modules that use a completely different API style (GetGameAPI
+function-pointer tables, for instance).
+
+The entryPoint replaces vmMain — the engine calls it for GAME_INIT,
+GAME_RUN_FRAME, etc.  The systemCalls function replaces the DLL's
+syscall dispatcher — it's called by VM_DllSyscall when the module
+makes engine calls.
+
+If a VM with the given name already exists in the table it is reused
+(entry point and syscall updated in place) to avoid exhausting the
+fixed-size vmTable during level restarts.
+
+The isFake flag prevents VM_Free from calling Sys_UnloadDll on
+shutdown, since there's no real library handle to unload.
+===============
+*/
 vm_t *VM_CreateFakeWithSyscall( const char *module,
 	intptr_t (QDECL *entryPoint)( int callNum, ... ),
 	intptr_t (*systemCalls)( intptr_t *parms ) ) {
 	vm_t *vm;
 	int i;
 
-	// Check if we already have a VM with this name (reuse it)
+	/* Reuse an existing slot with the same name (handles level restarts). */
 	for ( i = 0 ; i < MAX_VM ; i++ ) {
 		if ( !Q_stricmp( vmTable[i].name, module ) ) {
 			vm = &vmTable[i];

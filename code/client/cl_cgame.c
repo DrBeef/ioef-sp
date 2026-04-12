@@ -774,8 +774,23 @@ void CL_InitCGame( void ) {
 	}
 
 #ifdef ELITEFORCE
+	/*
+	 * SP cgame loading path.
+	 *
+	 * The EF1 SP game DLL (efgamex86.dll) is a single binary that
+	 * contains BOTH the server-side game module (accessed via GetGameAPI)
+	 * AND the client-side cgame module (accessed via dllEntry/vmMain).
+	 *
+	 * We get the already-loaded DLL handle from the server side, find
+	 * the dllEntry and vmMain exports, and set up a fake VM that
+	 * dispatches cgame syscalls through CL_SPCgameSystemCalls (which
+	 * translates the SP's 71-syscall numbering to engine functions).
+	 *
+	 * currentVM must be set to cgvm before calling dllEntry so that
+	 * VM_DllSyscall (the function pointer we pass to the DLL) can
+	 * find the correct systemCall dispatcher for cgame traps.
+	 */
 	if ( Cvar_VariableIntegerValue( "sp_game" ) ) {
-		// SP mode: the cgame code is inside efgamex86.dll (same DLL as game).
 		extern void *SV_SP_GetGameLibrary(void);
 		void *gameLib = SV_SP_GetGameLibrary();
 		if ( gameLib ) {
@@ -791,6 +806,8 @@ void CL_InitCGame( void ) {
 				if ( !cgvm ) {
 					Com_Error( ERR_DROP, "VM_CreateFakeWithSyscall on SP cgame failed" );
 				}
+				/* Must set currentVM before dllEntry so VM_DllSyscall routes
+				   cgame traps to CL_SPCgameSystemCalls, not the game dispatcher. */
 				currentVM = cgvm;
 				cgDllEntry( VM_DllSyscall );
 
