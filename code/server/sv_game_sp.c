@@ -2499,10 +2499,23 @@ void *SV_SP_GetGameLibrary( void ) {
 	return gameLibrary;
 }
 
+// Returns the game export table.  Used by other subsystems that need to
+// query SP-specific game module state (e.g., gentitySize for entity
+// iteration).
 sp_game_export_t *SV_SP_GetGameExport( void ) {
 	return ge;
 }
 
+/*
+===============
+SV_SP_GetRawPlayerState
+
+Returns a pointer to the SP game module's raw sp_playerState_t (NOT the
+translated ioEF playerState_t).  Used by cl_cgame_sp.c when building
+SP-format snapshots for the cgame -- the cgame expects sp_playerState_t
+layout, not the ioEF layout.  This bypasses the translation layer.
+===============
+*/
 void *SV_SP_GetRawPlayerState( void ) {
 	if ( ge && ge->gentities ) {
 		sp_gentity_t *playerEnt = (sp_gentity_t *)ge->gentities;
