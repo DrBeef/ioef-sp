@@ -2192,29 +2192,34 @@ void SV_SP_InitGameProgs( void ) {
 	// Set up the import table
 	SV_SP_InitGameImport();
 
-	// Load the SP game DLL - search in basepath/gamedir
-	Com_Printf( "Loading SP game module: efgamex86.dll\n" );
-
-	basepath = Cvar_VariableString( "fs_basepath" );
-	gamedir = Cvar_VariableString( "fs_game" );
-
-	if ( !gamedir[0] ) {
-		gamedir = Cvar_VariableString( "com_basegame" );
-	}
-
-	// Try basepath/gamedir/efgamex86.dll first
-	Com_sprintf( dllPath, sizeof(dllPath), "%s/%s/efgamex86.dll", basepath, gamedir );
-	Com_Printf( "Try loading dll file %s\n", dllPath );
-	gameLibrary = Sys_LoadLibrary( dllPath );
-
+	/*
+	 * On map transitions, the DLL stays loaded (see ShutdownGameProgs).
+	 * Only load it if this is the first time or if the engine fully shut down.
+	 */
 	if ( !gameLibrary ) {
-		// Try just efgamex86.dll in current directory
-		gameLibrary = Sys_LoadLibrary( "efgamex86.dll" );
-	}
+		Com_Printf( "Loading SP game module: efgamex86.dll\n" );
 
-	if ( !gameLibrary ) {
-		Com_Error( ERR_FATAL, "SV_SP_InitGameProgs: failed to load efgamex86.dll\n"
-				   "Searched: %s", dllPath );
+		basepath = Cvar_VariableString( "fs_basepath" );
+		gamedir = Cvar_VariableString( "fs_game" );
+
+		if ( !gamedir[0] ) {
+			gamedir = Cvar_VariableString( "com_basegame" );
+		}
+
+		Com_sprintf( dllPath, sizeof(dllPath), "%s/%s/efgamex86.dll", basepath, gamedir );
+		Com_Printf( "Try loading dll file %s\n", dllPath );
+		gameLibrary = Sys_LoadLibrary( dllPath );
+
+		if ( !gameLibrary ) {
+			gameLibrary = Sys_LoadLibrary( "efgamex86.dll" );
+		}
+
+		if ( !gameLibrary ) {
+			Com_Error( ERR_FATAL, "SV_SP_InitGameProgs: failed to load efgamex86.dll\n"
+					   "Searched: %s", dllPath );
+		}
+	} else {
+		Com_Printf( "Reusing already-loaded SP game module\n" );
 	}
 
 	// Get the GetGameAPI entry point
@@ -2276,10 +2281,16 @@ void SV_SP_ShutdownGameProgs( void ) {
 		ge = NULL;
 	}
 
-	if ( gameLibrary ) {
-		Sys_UnloadLibrary( gameLibrary );
-		gameLibrary = NULL;
-	}
+	/*
+	 * Do NOT unload the DLL here.  efgamex86.dll contains both the
+	 * server game (GetGameAPI) and the client cgame (dllEntry/vmMain).
+	 * During a map transition the server shuts down first while the
+	 * client's cgame may still be executing code from this DLL.
+	 * Unloading it would crash the cgame with a SIGSEGV.
+	 *
+	 * The DLL stays loaded and is reused for the next map.
+	 * SV_SP_InitGameProgs will re-call GetGameAPI on the same handle.
+	 */
 
 	entityDataLocated = qfalse;
 	sv.gentities = NULL;
@@ -2287,7 +2298,7 @@ void SV_SP_ShutdownGameProgs( void ) {
 	sv.num_entities = 0;
 	sv_sp_savedGameJustLoaded = eNO;
 
-	Com_Printf( "SP game module unloaded\n" );
+	Com_Printf( "SP game module shut down\n" );
 }
 
 /*

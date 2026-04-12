@@ -195,9 +195,9 @@ static void debug_parse_cmd(const char *json, debugCmd_t *cmd) {
 
 		if (!strcmp(key, "cmd")) {
 			p = json_extract_string(p, cmd->cmd, sizeof(cmd->cmd));
-		} else if (!strcmp(key, "name") || !strcmp(key, "struct") || !strcmp(key, "field")) {
+		} else if (!strcmp(key, "name") || !strcmp(key, "struct") || !strcmp(key, "field") || !strcmp(key, "str1")) {
 			p = json_extract_string(p, cmd->strArg1, sizeof(cmd->strArg1));
-		} else if (!strcmp(key, "command") || !strcmp(key, "op")) {
+		} else if (!strcmp(key, "command") || !strcmp(key, "op") || !strcmp(key, "str2")) {
 			p = json_extract_string(p, cmd->strArg2, sizeof(cmd->strArg2));
 		} else if (!strcmp(key, "num") || !strcmp(key, "value")) {
 			if (*p == '"') {
@@ -1047,6 +1047,28 @@ static void debug_handle_command(debugClient_t *client, const char *json) {
 		debug_cmd_search(&jb, cmd.strArg1, cmd.strArg2, cmd.intArg2);
 	} else if (!strcmp(cmd.cmd, "cvar")) {
 		debug_cmd_cvar(&jb, cmd.strArg1);
+	} else if (!strcmp(cmd.cmd, "exec")) {
+		/*
+		 * Execute a console command on the server.  This allows MCP clients
+		 * to change maps, toggle cvars, run "noclip", etc. without needing
+		 * window focus.  The command is appended to the command buffer and
+		 * will execute on the next server frame.
+		 */
+		if (cmd.strArg1[0]) {
+			Cbuf_AddText( cmd.strArg1 );
+			Cbuf_AddText( "\n" );
+			jb_raw(&jb, "{");
+			jb_str(&jb, "type", "exec_ok");
+			jb_raw(&jb, ",");
+			jb_str(&jb, "command", cmd.strArg1);
+			jb_raw(&jb, "}\n");
+		} else {
+			jb_raw(&jb, "{");
+			jb_str(&jb, "type", "error");
+			jb_raw(&jb, ",");
+			jb_str(&jb, "error", "exec requires a command string in 'str1'");
+			jb_raw(&jb, "}\n");
+		}
 	} else if (!strcmp(cmd.cmd, "ping")) {
 		jb_raw(&jb, "{\"type\":\"pong\"}\n");
 	} else {
@@ -1055,7 +1077,7 @@ static void debug_handle_command(debugClient_t *client, const char *json) {
 		jb_raw(&jb, ",");
 		jb_str(&jb, "error", "unknown command");
 		jb_raw(&jb, ",");
-		jb_str(&jb, "available", "status, entity, entities, player, layout, validate, search, cvar, ping");
+		jb_str(&jb, "available", "status, entity, entities, player, layout, validate, search, cvar, exec, ping");
 		jb_raw(&jb, "}\n");
 	}
 

@@ -498,6 +498,39 @@ server.tool(
   }
 );
 
+// -- exec_command -------------------------------------------------------------
+
+server.tool(
+  "exec_command",
+  "Execute a console command on the running game server. Use this to change maps ('map borg2'), toggle cheats ('noclip'), set cvars ('set g_speed 400'), etc. The command runs on the next server frame. Examples: 'map voy1', 'devmap borg1', 'noclip', 'god', 'give all', 'set r_fullbright 1; vid_restart'.",
+  {
+    command: z
+      .string()
+      .describe(
+        "Console command to execute (e.g. 'map borg2', 'noclip', 'set sv_cheats 1')"
+      ),
+  },
+  async ({ command }) => {
+    const result = await queryGame({ cmd: "exec", str1: command });
+    return { content: [{ type: "text", text: formatJson(result) }] };
+  }
+);
+
+// -- set_cvar ----------------------------------------------------------------
+
+server.tool(
+  "set_cvar",
+  "Set a game engine cvar (console variable) to a new value. Shorthand for exec_command('set name value').",
+  {
+    name: z.string().describe("Cvar name"),
+    value: z.string().describe("New value"),
+  },
+  async ({ name, value }) => {
+    const result = await queryGame({ cmd: "exec", str1: `set ${name} ${value}` });
+    return { content: [{ type: "text", text: formatJson(result) }] };
+  }
+);
+
 // ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
