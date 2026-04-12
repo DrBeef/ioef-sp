@@ -198,11 +198,11 @@ typedef struct {
 	void		(*ReadLevel)  (qboolean qbAutosave, qboolean qbLoadTransition);
 	qboolean	(*GameAllowedToSaveHere)(void);
 	char		*(*ClientConnect)( int clientNum, qboolean firstTime, SavedGameJustLoaded_e eSavedGameJustLoaded );
-	void		(*ClientBegin)( int clientNum, usercmd_t *cmd, SavedGameJustLoaded_e eSavedGameJustLoaded);
+	void		(*ClientBegin)( int clientNum, sp_usercmd_t *cmd, SavedGameJustLoaded_e eSavedGameJustLoaded);
 	void		(*ClientUserinfoChanged)( int clientNum );
 	void		(*ClientDisconnect)( int clientNum );
 	void		(*ClientCommand)( int clientNum );
-	void		(*ClientThink)( int clientNum, usercmd_t *cmd );
+	void		(*ClientThink)( int clientNum, sp_usercmd_t *cmd );
 	void		(*RunFrame)( int levelTime );
 	qboolean	(*ConsoleCommand)( void );
 	// The game module sets these after allocating its entity array during Init.
@@ -2469,14 +2469,27 @@ intptr_t QDECL SV_SP_GameVmMain( int command, ... ) {
 		return 0;
 	}
 
-	case GAME_CLIENT_BEGIN:
+	case GAME_CLIENT_BEGIN: {
 		// Q3 passes: clientNum
-		// SP expects: clientNum, usercmd_t*, SavedGameJustLoaded_e
-		ge->ClientBegin( arg0, &svs.clients[arg0].lastUsercmd, sv_sp_savedGameJustLoaded );
+		// SP expects: clientNum, sp_usercmd_t*, SavedGameJustLoaded_e
+		// Translate usercmd: SP has int buttons, ioEF has byte buttons
+		sp_usercmd_t spCmd;
+		usercmd_t *cmd = &svs.clients[arg0].lastUsercmd;
+		spCmd.serverTime = cmd->serverTime;
+		spCmd.buttons = cmd->buttons;
+		spCmd.weapon = cmd->weapon;
+		spCmd.angles[0] = cmd->angles[0];
+		spCmd.angles[1] = cmd->angles[1];
+		spCmd.angles[2] = cmd->angles[2];
+		spCmd.forwardmove = cmd->forwardmove;
+		spCmd.rightmove = cmd->rightmove;
+		spCmd.upmove = cmd->upmove;
+		ge->ClientBegin( arg0, &spCmd, sv_sp_savedGameJustLoaded );
 		sv_sp_savedGameJustLoaded = eNO;
 		// Update client pointer in case it changed
 		SV_SP_SetupGameClient( arg0 );
 		return 0;
+	}
 
 	case GAME_CLIENT_USERINFO_CHANGED:
 		ge->ClientUserinfoChanged( arg0 );
@@ -2490,13 +2503,26 @@ intptr_t QDECL SV_SP_GameVmMain( int command, ... ) {
 		ge->ClientCommand( arg0 );
 		return 0;
 
-	case GAME_CLIENT_THINK:
+	case GAME_CLIENT_THINK: {
 		// Q3 passes: clientNum
-		// SP expects: clientNum, usercmd_t*
-		ge->ClientThink( arg0, &svs.clients[arg0].lastUsercmd );
+		// SP expects: clientNum, sp_usercmd_t*
+		// Translate usercmd: SP has int buttons, ioEF has byte buttons
+		sp_usercmd_t spCmd;
+		usercmd_t *cmd = &svs.clients[arg0].lastUsercmd;
+		spCmd.serverTime = cmd->serverTime;
+		spCmd.buttons = cmd->buttons;
+		spCmd.weapon = cmd->weapon;
+		spCmd.angles[0] = cmd->angles[0];
+		spCmd.angles[1] = cmd->angles[1];
+		spCmd.angles[2] = cmd->angles[2];
+		spCmd.forwardmove = cmd->forwardmove;
+		spCmd.rightmove = cmd->rightmove;
+		spCmd.upmove = cmd->upmove;
+		ge->ClientThink( arg0, &spCmd );
 		// Update entity count in case the game changed it
 		sv.num_entities = ge->num_entities;
 		return 0;
+	}
 
 	case GAME_RUN_FRAME:
 		// Sync entities before the frame so traces during RunFrame see current data

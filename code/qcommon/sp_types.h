@@ -376,4 +376,21 @@ struct sp_gentity_s {
 	   pointer arithmetic when iterating past this point. */
 };
 
+// ============================================================================
+// SP usercmd_t
+//
+// The SP game module's usercmd_t has `int buttons` (4 bytes) instead of
+// ioEF's `byte buttons` (1 byte).  This 3-byte difference shifts the
+// weapon, angles, and movement fields to different offsets.  The engine
+// must translate usercmd_t before passing it to ge->ClientThink/ClientBegin.
+// ============================================================================
+
+typedef struct {
+	int			serverTime;
+	int			buttons;		// int in SP, byte in ioEF
+	byte		weapon;
+	int			angles[3];
+	signed char	forwardmove, rightmove, upmove;
+} sp_usercmd_t;
+
 #endif /* SP_TYPES_H */
