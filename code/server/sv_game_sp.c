@@ -2303,6 +2303,24 @@ void SV_SP_ShutdownGameProgs( void ) {
 
 /*
 ===============
+SV_SP_UnloadDLL
+
+Actually unloads the SP game DLL.  Called from SV_SpawnServer AFTER
+both the cgame and server game have been shut down, so no code in the
+DLL can be executing.  The DLL will be reloaded fresh by
+SV_SP_InitGameProgs, which resets its global variables.
+===============
+*/
+void SV_SP_UnloadDLL( void ) {
+	if ( gameLibrary ) {
+		Com_Printf( "SP: unloading game DLL for clean map transition\n" );
+		Sys_UnloadLibrary( gameLibrary );
+		gameLibrary = NULL;
+	}
+}
+
+/*
+===============
 SV_SP_InitGameVM
 
 Initializes the SP game module by calling ge->Init with the proper

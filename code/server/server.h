@@ -428,6 +428,7 @@ intptr_t QDECL SV_SP_GameVmMain( int command, ... );
 void		*SV_SP_GetGameLibrary( void );
 void		*SV_SP_GetRawPlayerState( void );
 sp_entityState_t *SV_SP_GetRawEntityState( int entNum );
+void		SV_SP_UnloadDLL( void );
 qboolean	SV_SP_SaveGame( const char *slotName );
 qboolean	SV_SP_LoadGame( const char *slotName );
 qboolean	SV_SP_WipeSaveGame( const char *slotName );

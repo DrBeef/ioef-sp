@@ -406,6 +406,22 @@ void SV_SpawnServer( char *server, qboolean killBots ) {
 	char		systemInfo[16384];
 	const char	*p;
 
+#ifdef ELITEFORCE
+	/*
+	 * In SP mode, shut down the cgame BEFORE the server game.
+	 * Both live in the same DLL (efgamex86.dll), and the cgame's
+	 * CG_SHUTDOWN handler may touch game state that ge->Shutdown()
+	 * frees.  CL_ShutdownCGame is safe to call here — if there's no
+	 * cgame running it returns immediately.  CL_ShutdownAll later
+	 * will skip the cgame shutdown since cgvm is already NULL.
+	 */
+	if ( Cvar_VariableIntegerValue( "sp_game" ) ) {
+		extern void CL_ShutdownCGame( void );
+		Com_Printf( "SP: shutting down cgame before server game\n" );
+		CL_ShutdownCGame();
+	}
+#endif
+
 	// shut down the existing game if it is running
 	SV_ShutdownGameProgs();
 
@@ -418,6 +434,22 @@ void SV_SpawnServer( char *server, qboolean killBots ) {
 
 	// make sure all the client stuff is unloaded
 	CL_ShutdownAll(qfalse);
+
+#ifdef ELITEFORCE
+	/*
+	 * Now that BOTH cgame and game have been shut down, it's safe to
+	 * unload the SP game DLL.  The DLL must be reloaded fresh for each
+	 * map because its global variables (entity arrays, game state) are
+	 * in the DLL's data segment and aren't reset otherwise.
+	 */
+	if ( Cvar_VariableIntegerValue( "sp_game" ) ) {
+		extern void *SV_SP_GetGameLibrary( void );
+		void *lib = SV_SP_GetGameLibrary();
+		if ( lib ) {
+			extern void SV_SP_UnloadDLL( void );
+			SV_SP_UnloadDLL();
+		}
+	}
 #endif
 
 	// clear the whole hunk because we're (re)loading the server
