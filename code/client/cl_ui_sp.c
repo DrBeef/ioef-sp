@@ -1139,6 +1139,18 @@ qboolean CL_SP_IsUIActive( void ) {
 	return uiLibrary != NULL || ue != NULL;
 }
 
+void CL_SP_UIUpdateConnectionString( const char *string ) {
+	if ( ue && ue->UI_UpdateConnectionString ) {
+		ue->UI_UpdateConnectionString( (char *)string );
+	}
+}
+
+void CL_SP_UIUpdateConnectionMessageString( const char *string ) {
+	if ( ue && ue->UI_UpdateConnectionMessageString ) {
+		ue->UI_UpdateConnectionMessageString( (char *)string );
+	}
+}
+
 /*
 ===============
 CL_SP_UIVmMain
@@ -1219,6 +1231,9 @@ intptr_t QDECL CL_SP_UIVmMain( int command, ... ) {
 	case UI_SET_ACTIVE_MENU: {
 		// The ioEF engine passes a uiMenuCommand_t enum value.
 		// Map it to the string-based SP UI interface.
+		// The DLL's UI_SetActiveMenu (ui_atoms.cpp) compares against short
+		// lowercase names: "main", "ingame", "needcd", "newgame", etc.
+		// Passing NULL triggers UI_ForceMenuOff() to dismiss menus.
 		const char *menuname;
 		const char *menuID = NULL;
 
@@ -1227,30 +1242,32 @@ intptr_t QDECL CL_SP_UIVmMain( int command, ... ) {
 			menuname = NULL;
 			break;
 		case UIMENU_MAIN:
-			menuname = "mainMenu";
+			menuname = "main";
 			break;
 		case UIMENU_INGAME:
-			menuname = "ingameMenu";
+			menuname = "ingame";
 			break;
 		case UIMENU_NEED_CD:
-			menuname = "needCDMenu";
+			menuname = "needcd";
 			break;
 		case UIMENU_BAD_CD_KEY:
-			menuname = "badCDKeyMenu";
-			break;
 		case UIMENU_TEAM:
-			menuname = "teamMenu";
-			break;
 		case UIMENU_POSTGAME:
-			menuname = "postgameMenu";
+			// These enum values have no SP equivalent; fall through to main.
+			menuname = "main";
 			break;
 		default:
-			menuname = "mainMenu";
+			menuname = "main";
 			break;
 		}
 
+		// NULL menuname = close menu (UIMENU_NONE). The DLL's UI_SetActiveMenu
+		// calls UI_ForceMenuOff() for NULL, but some builds may not handle NULL
+		// in their string comparison. Use an empty string as a safe sentinel.
 		if ( menuname ) {
 			ue->UI_SetActiveMenu( menuname, menuID );
+		} else {
+			ue->UI_SetActiveMenu( "", menuID );
 		}
 		return 0;
 	}

@@ -382,7 +382,7 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 		S_Respatialize( args[1], VMA(2), VMA(3), args[4] );
 		return 0;
 	case SPCG_S_REGISTERSOUND:
-		return S_RegisterSound( VMA(1), args[2] );
+		return S_RegisterSound( VMA(1), qfalse );
 	case SPCG_S_STARTBACKGROUNDTRACK:
 		/* The SP cgame passes a NULL or empty string to stop the music track
 		   (e.g., during transitions between cinematic and gameplay).

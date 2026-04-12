@@ -473,6 +473,14 @@ void CL_ParseGamestate( msg_t *msg ) {
 
 	Con_Close();
 
+#ifdef ELITEFORCE
+	// Clear the SP UI connection retry display now that the server has
+	// accepted the connection and is sending us a gamestate.
+	if ( CL_SP_IsUIActive() ) {
+		CL_SP_UIUpdateConnectionString( "" );
+	}
+#endif
+
 	clc.connectPacketCount = 0;
 
 	// wipe local client state

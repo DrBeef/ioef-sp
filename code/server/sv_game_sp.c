@@ -271,6 +271,8 @@ static void SV_SP_SyncPlayerState( void *sp_client ) {
 	VectorCopy( sp_ps->origin, ps->origin );
 	VectorCopy( sp_ps->velocity, ps->velocity );
 	ps->weaponTime      = sp_ps->weaponTime;
+	ps->rechargeTime    = sp_ps->rechargeTime;
+	ps->useTime         = sp_ps->useTime;
 	ps->gravity         = sp_ps->gravity;
 	ps->speed           = sp_ps->speed;
 	ps->delta_angles[0] = sp_ps->delta_angles[0];
@@ -2380,6 +2382,11 @@ void SV_SP_InitGameVM( void ) {
 	// Get the entity string from the loaded BSP
 	entstring = CM_EntityString();
 
+	// Resolve load type BEFORE the map-name check (was previously read
+	// before assignment -- undefined behaviour).
+	loadType = ( sv_sp_pendingLoadType != eNO ) ? sv_sp_pendingLoadType : eNO;
+	loadTransition = qfalse;
+
 	if ( loadType != eNO && Q_stricmp( sv_sp_pendingLoadMap, mapname ) ) {
 		Com_Error( ERR_DROP, "SV_SP_InitGameVM: savegame map '%s' does not match loaded map '%s'",
 			sv_sp_pendingLoadMap, mapname );
@@ -2390,8 +2397,6 @@ void SV_SP_InitGameVM( void ) {
 	memset( sv_sp_entities, 0, sizeof( sv_sp_entities ) );
 	entityDataLocated = qfalse;
 	sv_sp_savedGameJustLoaded = eNO;
-	loadType = ( sv_sp_pendingLoadType != eNO ) ? sv_sp_pendingLoadType : eNO;
-	loadTransition = qfalse;
 	Q_strncpyz( loadQPath, sv_sp_pendingLoadQPath, sizeof( loadQPath ) );
 
 	// Initialize the game module
@@ -2551,9 +2556,7 @@ intptr_t QDECL SV_SP_GameVmMain( int command, ... ) {
 		spCmd.forwardmove = cmd->forwardmove;
 		spCmd.rightmove = cmd->rightmove;
 		spCmd.upmove = cmd->upmove;
-		SV_SP_BindCgameStub();
 		ge->ClientThink( arg0, &spCmd );
-		SV_SP_RestoreCgameSyscall();
 		// Update entity count in case the game changed it
 		sv.num_entities = ge->num_entities;
 		return 0;
@@ -2562,9 +2565,7 @@ intptr_t QDECL SV_SP_GameVmMain( int command, ... ) {
 	case GAME_RUN_FRAME:
 		// Sync entities before the frame so traces during RunFrame see current data
 		SV_SP_SyncAllEntities();
-		SV_SP_BindCgameStub();
 		ge->RunFrame( arg0 );
-		SV_SP_RestoreCgameSyscall();
 		// Sync again after the frame for snapshot building
 		SV_SP_SyncAllEntities();
 		return 0;

@@ -415,9 +415,8 @@ void SV_SpawnServer( char *server, qboolean killBots ) {
 	 * cgame running it returns immediately.  CL_ShutdownAll later
 	 * will skip the cgame shutdown since cgvm is already NULL.
 	 */
-	if ( Cvar_VariableIntegerValue( "sp_game" ) ) {
+	if ( SV_SP_IsActive() ) {
 		extern void CL_ShutdownCGame( void );
-		Com_Printf( "SP: shutting down cgame before server game\n" );
 		CL_ShutdownCGame();
 	}
 #endif

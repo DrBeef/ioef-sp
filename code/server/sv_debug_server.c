@@ -2032,6 +2032,700 @@ static void debug_cmd_point_contents(jsonBuf_t *jb, const debugCmd_t *cmd) {
 }
 
 // ------------------------------------------------------------------
+// String pointer scan — find string pointers in entity memory
+// Detects int32 values that look like valid pointers and attempts
+// to read a C string from them. Useful for classname, targetname,
+// model, script_targetname, etc.
+// ------------------------------------------------------------------
+
+static qboolean debug_is_readable_pointer(const void *ptr) {
+	uintptr_t addr = (uintptr_t)ptr;
+	if (addr < 0x10000 || addr > 0x7FFFFFFF) return qfalse;
+
+#ifdef _WIN32
+	// VirtualQuery to check if the page is committed and readable
+	MEMORY_BASIC_INFORMATION mbi;
+	if (VirtualQuery(ptr, &mbi, sizeof(mbi)) == 0) return qfalse;
+	if (mbi.State != MEM_COMMIT) return qfalse;
+	if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return qfalse;
+	return qtrue;
+#else
+	return qfalse;
+#endif
+}
+
+static qboolean debug_read_string_safe(uintptr_t addr, char *out, int outSz) {
+	if (!debug_is_readable_pointer((const void *)addr)) return qfalse;
+
+	const char *src = (const char *)addr;
+
+	// Verify it looks like a printable ASCII string (at least 2 chars)
+	int i;
+	for (i = 0; i < outSz - 1; i++) {
+		if (!debug_is_readable_pointer((const void *)(src + i))) {
+			if (i < 2) return qfalse;
+			out[i] = '\0';
+			return qtrue;
+		}
+		char c = src[i];
+		if (c == '\0') {
+			out[i] = '\0';
+			return (i >= 2); // must be at least 2 chars
+		}
+		if (c < 0x20 || c > 0x7e) {
+			return qfalse; // not printable ASCII
+		}
+		out[i] = c;
+	}
+	out[outSz - 1] = '\0';
+	return (i >= 2);
+}
+
+static void debug_cmd_strings(jsonBuf_t *jb, int entNum) {
+	jb_raw(jb, "{");
+	jb_str(jb, "type", "strings");
+
+	if (!sv.gentities) {
+		jb_raw(jb, ","); jb_str(jb, "error", "no entities loaded");
+		jb_raw(jb, "}\n");
+		return;
+	}
+	if (entNum < 0 || entNum >= sv.num_entities) {
+		jb_raw(jb, ","); jb_str(jb, "error", "invalid entity number");
+		jb_raw(jb, "}\n");
+		return;
+	}
+
+	byte *base = (byte *)sv.gentities + sv.gentitySize * entNum;
+	int sharedSize = (int)sizeof(sharedEntity_t);
+
+	jb_raw(jb, ","); jb_int(jb, "entNum", entNum);
+	jb_raw(jb, ","); jb_int(jb, "gentitySize", sv.gentitySize);
+	jb_raw(jb, ","); jb_int(jb, "sharedEntitySize", sharedSize);
+	jb_raw(jb, ",\"strings\":[");
+
+	int first = 1;
+	int offset;
+	char strBuf[256];
+
+	// Scan all int32-aligned positions in the entity
+	for (offset = 0; offset + 4 <= sv.gentitySize; offset += 4) {
+		uintptr_t val;
+		memcpy(&val, base + offset, sizeof(uintptr_t));
+
+		if (debug_read_string_safe(val, strBuf, sizeof(strBuf))) {
+			if (!first) jb_raw(jb, ",");
+			first = 0;
+			jb_raw(jb, "{");
+			jb_int(jb, "offset", offset);
+			jb_raw(jb, ","); jb_str(jb, "value", strBuf);
+			jb_raw(jb, ","); jb_printf(jb, "\"ptr\":\"0x%08x\"", (unsigned int)val);
+			jb_raw(jb, ","); jb_str(jb, "region", offset < sharedSize ? "shared" : "private");
+			jb_raw(jb, "}");
+		}
+	}
+
+	jb_raw(jb, "]}\n");
+}
+
+// ------------------------------------------------------------------
+// Function pointer scan — identify entity offsets that contain
+// addresses within the game DLL's code range
+// ------------------------------------------------------------------
+
+static uintptr_t dllCodeBase = 0;
+static uintptr_t dllCodeEnd = 0;
+
+// Called once after game DLL loads to cache its code range
+static void debug_detect_dll_range(void) {
+	if (dllCodeBase != 0) return; // already detected
+
+	if (!sv.gentities || sv.num_entities < 1) return;
+
+	byte *base = (byte *)sv.gentities;
+	int offset;
+
+	// Gather candidate code pointers from entity 0 (worldspawn)
+	// Look for clusters of values in the same 0xXX000000 range
+	int counts[256] = {0};
+	for (offset = (int)sizeof(sharedEntity_t); offset + 4 <= sv.gentitySize; offset += 4) {
+		uintptr_t val;
+		memcpy(&val, base + offset, sizeof(uintptr_t));
+		if (val >= 0x10000 && val <= 0x7FFFFFFF) {
+			unsigned int page = (unsigned int)(val >> 24);
+			if (page < 256) counts[page]++;
+		}
+	}
+
+	// Find the page with the most hits — likely the DLL base
+	int bestPage = 0, bestCount = 0;
+	int i;
+	for (i = 0; i < 256; i++) {
+		if (counts[i] > bestCount) {
+			bestCount = counts[i];
+			bestPage = i;
+		}
+	}
+
+	if (bestCount >= 3) {
+		// Refine: scan for actual min/max in that page range
+		uintptr_t minAddr = 0xFFFFFFFF, maxAddr = 0;
+		for (offset = (int)sizeof(sharedEntity_t); offset + 4 <= sv.gentitySize; offset += 4) {
+			uintptr_t val;
+			memcpy(&val, base + offset, sizeof(uintptr_t));
+			if ((val >> 24) == (unsigned int)bestPage) {
+				if (val < minAddr) minAddr = val;
+				if (val > maxAddr) maxAddr = val;
+			}
+		}
+		// Align to page boundaries with some margin
+		dllCodeBase = minAddr & ~0xFFF;
+		dllCodeEnd = (maxAddr + 0x1000) & ~0xFFF;
+	}
+}
+
+static void debug_cmd_funcscan(jsonBuf_t *jb, int entNum) {
+	jb_raw(jb, "{");
+	jb_str(jb, "type", "funcscan");
+
+	if (!sv.gentities) {
+		jb_raw(jb, ","); jb_str(jb, "error", "no entities loaded");
+		jb_raw(jb, "}\n");
+		return;
+	}
+	if (entNum < 0 || entNum >= sv.num_entities) {
+		jb_raw(jb, ","); jb_str(jb, "error", "invalid entity number");
+		jb_raw(jb, "}\n");
+		return;
+	}
+
+	debug_detect_dll_range();
+
+	byte *base = (byte *)sv.gentities + sv.gentitySize * entNum;
+	int sharedSize = (int)sizeof(sharedEntity_t);
+
+	jb_raw(jb, ","); jb_int(jb, "entNum", entNum);
+	jb_raw(jb, ","); jb_int(jb, "gentitySize", sv.gentitySize);
+	jb_raw(jb, ","); jb_printf(jb, "\"dllCodeBase\":\"0x%08x\"", (unsigned int)dllCodeBase);
+	jb_raw(jb, ","); jb_printf(jb, "\"dllCodeEnd\":\"0x%08x\"", (unsigned int)dllCodeEnd);
+	jb_raw(jb, ",\"functions\":[");
+
+	int first = 1;
+	int offset;
+
+	for (offset = sharedSize; offset + 4 <= sv.gentitySize; offset += 4) {
+		uintptr_t val;
+		memcpy(&val, base + offset, sizeof(uintptr_t));
+
+		if (dllCodeBase && val >= dllCodeBase && val < dllCodeEnd) {
+			if (!first) jb_raw(jb, ",");
+			first = 0;
+			jb_raw(jb, "{");
+			jb_int(jb, "offset", offset);
+			jb_raw(jb, ","); jb_printf(jb, "\"address\":\"0x%08x\"", (unsigned int)val);
+			jb_raw(jb, ","); jb_int(jb, "privateOffset", offset - sharedSize);
+			jb_raw(jb, "}");
+		}
+	}
+
+	jb_raw(jb, "]}\n");
+}
+
+// ------------------------------------------------------------------
+// Bulk field scan — read same offset across all active entities
+// Returns distinct values and which entity numbers have each value
+// ------------------------------------------------------------------
+
+static void debug_cmd_bulkscan(jsonBuf_t *jb, int offset, int width, qboolean activeOnly) {
+	jb_raw(jb, "{");
+	jb_str(jb, "type", "bulkscan");
+
+	if (!sv.gentities) {
+		jb_raw(jb, ","); jb_str(jb, "error", "no entities loaded");
+		jb_raw(jb, "}\n");
+		return;
+	}
+	if (offset < 0 || offset + 4 > sv.gentitySize) {
+		jb_raw(jb, ","); jb_str(jb, "error", "offset out of range");
+		jb_raw(jb, ","); jb_int(jb, "gentitySize", sv.gentitySize);
+		jb_raw(jb, "}\n");
+		return;
+	}
+	if (width != 1 && width != 2 && width != 4) width = 4;
+
+	debug_detect_dll_range();
+
+	jb_raw(jb, ","); jb_int(jb, "offset", offset);
+	jb_raw(jb, ","); jb_int(jb, "width", width);
+	jb_raw(jb, ","); jb_int(jb, "gentitySize", sv.gentitySize);
+
+	// Collect distinct values (up to 128 unique values tracked)
+	#define BULK_MAX_DISTINCT 128
+	struct { int value; int count; int firstEnt; int lastEnt; } distinct[BULK_MAX_DISTINCT];
+	int numDistinct = 0;
+	int scanned = 0;
+	int i, j;
+
+	for (i = 0; i < sv.num_entities; i++) {
+		sharedEntity_t *ent = SV_GentityNum(i);
+		if (activeOnly && !ent->r.linked) continue;
+
+		byte *entBase = (byte *)sv.gentities + sv.gentitySize * i;
+		int val = 0;
+		if (width == 4) memcpy(&val, entBase + offset, 4);
+		else if (width == 2) { short sv2; memcpy(&sv2, entBase + offset, 2); val = sv2; }
+		else { val = *(signed char *)(entBase + offset); }
+
+		scanned++;
+
+		// Find or insert
+		qboolean found = qfalse;
+		for (j = 0; j < numDistinct; j++) {
+			if (distinct[j].value == val) {
+				distinct[j].count++;
+				distinct[j].lastEnt = i;
+				found = qtrue;
+				break;
+			}
+		}
+		if (!found && numDistinct < BULK_MAX_DISTINCT) {
+			distinct[numDistinct].value = val;
+			distinct[numDistinct].count = 1;
+			distinct[numDistinct].firstEnt = i;
+			distinct[numDistinct].lastEnt = i;
+			numDistinct++;
+		}
+	}
+
+	jb_raw(jb, ","); jb_int(jb, "scanned", scanned);
+	jb_raw(jb, ","); jb_int(jb, "distinctValues", numDistinct);
+	jb_raw(jb, ",\"values\":[");
+	for (i = 0; i < numDistinct; i++) {
+		if (i) jb_raw(jb, ",");
+		jb_raw(jb, "{");
+		jb_int(jb, "value", distinct[i].value);
+		jb_raw(jb, ","); jb_printf(jb, "\"hex\":\"0x%08x\"", (unsigned int)distinct[i].value);
+		jb_raw(jb, ","); jb_int(jb, "count", distinct[i].count);
+		jb_raw(jb, ","); jb_int(jb, "firstEnt", distinct[i].firstEnt);
+		jb_raw(jb, ","); jb_int(jb, "lastEnt", distinct[i].lastEnt);
+
+		// If this looks like a string pointer, try to resolve it
+		char strBuf[128];
+		if (width == 4 && debug_read_string_safe((uintptr_t)distinct[i].value, strBuf, sizeof(strBuf))) {
+			jb_raw(jb, ","); jb_str(jb, "string", strBuf);
+		}
+		// If this looks like a function pointer, flag it
+		if (width == 4 && dllCodeBase && (uintptr_t)distinct[i].value >= dllCodeBase && (uintptr_t)distinct[i].value < dllCodeEnd) {
+			jb_raw(jb, ","); jb_bool(jb, "isFunc", qtrue);
+		}
+
+		jb_raw(jb, "}");
+	}
+	jb_raw(jb, "]");
+
+	// Also output per-entity values for the first 64 entities
+	jb_raw(jb, ",\"entities\":[");
+	{
+		int first = 1;
+		int count = 0;
+		for (i = 0; i < sv.num_entities && count < 64; i++) {
+			sharedEntity_t *ent = SV_GentityNum(i);
+			if (activeOnly && !ent->r.linked) continue;
+
+			byte *entBase = (byte *)sv.gentities + sv.gentitySize * i;
+			int val = 0;
+			if (width == 4) memcpy(&val, entBase + offset, 4);
+			else if (width == 2) { short sv2; memcpy(&sv2, entBase + offset, 2); val = sv2; }
+			else { val = *(signed char *)(entBase + offset); }
+
+			if (!first) jb_raw(jb, ",");
+			first = 0;
+			jb_printf(jb, "{\"num\":%d,\"value\":%d,\"hex\":\"0x%08x\"}", i, val, (unsigned int)val);
+			count++;
+		}
+	}
+	jb_raw(jb, "]");
+
+	#undef BULK_MAX_DISTINCT
+	jb_raw(jb, "}\n");
+}
+
+// ------------------------------------------------------------------
+// Game client memory peek — read raw bytes from gclient_t
+// ------------------------------------------------------------------
+
+static void debug_cmd_client_peek(jsonBuf_t *jb, int clientNum, int offset, int length) {
+	jb_raw(jb, "{");
+	jb_str(jb, "type", "client_peek");
+
+	if (!sv.gameClients || clientNum < 0 || clientNum >= sv_maxclients->integer) {
+		jb_raw(jb, ","); jb_str(jb, "error", "invalid client number");
+		jb_raw(jb, "}\n");
+		return;
+	}
+	if (offset < 0 || offset >= sv.gameClientSize) {
+		jb_raw(jb, ","); jb_str(jb, "error", "offset out of range");
+		jb_raw(jb, ","); jb_int(jb, "gameClientSize", sv.gameClientSize);
+		jb_raw(jb, "}\n");
+		return;
+	}
+	if (length <= 0) length = 64;
+	if (length > 512) length = 512;
+	if (offset + length > sv.gameClientSize) length = sv.gameClientSize - offset;
+
+	byte *base = (byte *)sv.gameClients + sv.gameClientSize * clientNum;
+
+	jb_raw(jb, ","); jb_int(jb, "clientNum", clientNum);
+	jb_raw(jb, ","); jb_int(jb, "offset", offset);
+	jb_raw(jb, ","); jb_int(jb, "length", length);
+	jb_raw(jb, ","); jb_int(jb, "gameClientSize", sv.gameClientSize);
+	jb_raw(jb, ","); jb_int(jb, "playerStateSize", (int)sizeof(playerState_t));
+
+	// Hex dump
+	jb_raw(jb, ",\"hex\":\"");
+	int i;
+	for (i = 0; i < length; i++) {
+		jb_printf(jb, "%02x", base[offset + i]);
+	}
+	jb_raw(jb, "\"");
+
+	// int32 array
+	jb_raw(jb, ",\"int32s\":[");
+	int numInts = length / 4;
+	for (i = 0; i < numInts; i++) {
+		if (i) jb_raw(jb, ",");
+		int val;
+		memcpy(&val, base + offset + i * 4, 4);
+		jb_printf(jb, "%d", val);
+	}
+	jb_raw(jb, "]");
+
+	// Float interpretation
+	jb_raw(jb, ",\"floats\":[");
+	for (i = 0; i < numInts; i++) {
+		if (i) jb_raw(jb, ",");
+		float val;
+		memcpy(&val, base + offset + i * 4, 4);
+		if (IS_NAN(val) || IS_INF(val)) jb_raw(jb, "null");
+		else jb_printf(jb, "%.4f", val);
+	}
+	jb_raw(jb, "]");
+
+	// String scan on this region
+	jb_raw(jb, ",\"strings\":[");
+	{
+		int first = 1;
+		int off;
+		char strBuf[256];
+		for (off = 0; off + 4 <= length; off += 4) {
+			uintptr_t val;
+			memcpy(&val, base + offset + off, sizeof(uintptr_t));
+			if (debug_read_string_safe(val, strBuf, sizeof(strBuf))) {
+				if (!first) jb_raw(jb, ",");
+				first = 0;
+				jb_raw(jb, "{");
+				jb_int(jb, "offset", offset + off);
+				jb_raw(jb, ","); jb_str(jb, "value", strBuf);
+				jb_raw(jb, "}");
+			}
+		}
+	}
+	jb_raw(jb, "]");
+
+	jb_raw(jb, "}\n");
+}
+
+// ------------------------------------------------------------------
+// Client string scan — find string pointers in gclient_t
+// ------------------------------------------------------------------
+
+static void debug_cmd_client_strings(jsonBuf_t *jb, int clientNum) {
+	jb_raw(jb, "{");
+	jb_str(jb, "type", "client_strings");
+
+	if (!sv.gameClients || clientNum < 0 || clientNum >= sv_maxclients->integer) {
+		jb_raw(jb, ","); jb_str(jb, "error", "invalid client number");
+		jb_raw(jb, "}\n");
+		return;
+	}
+
+	byte *base = (byte *)sv.gameClients + sv.gameClientSize * clientNum;
+	int psSize = (int)sizeof(playerState_t);
+
+	jb_raw(jb, ","); jb_int(jb, "clientNum", clientNum);
+	jb_raw(jb, ","); jb_int(jb, "gameClientSize", sv.gameClientSize);
+	jb_raw(jb, ","); jb_int(jb, "playerStateSize", psSize);
+	jb_raw(jb, ",\"strings\":[");
+
+	int first = 1;
+	int offset;
+	char strBuf[256];
+
+	for (offset = 0; offset + 4 <= sv.gameClientSize; offset += 4) {
+		uintptr_t val;
+		memcpy(&val, base + offset, sizeof(uintptr_t));
+
+		if (debug_read_string_safe(val, strBuf, sizeof(strBuf))) {
+			if (!first) jb_raw(jb, ",");
+			first = 0;
+			jb_raw(jb, "{");
+			jb_int(jb, "offset", offset);
+			jb_raw(jb, ","); jb_str(jb, "value", strBuf);
+			jb_raw(jb, ","); jb_printf(jb, "\"ptr\":\"0x%08x\"", (unsigned int)val);
+			jb_raw(jb, ","); jb_str(jb, "region", offset < psSize ? "playerState" : "private");
+			jb_raw(jb, "}");
+		}
+	}
+
+	jb_raw(jb, "]}\n");
+}
+
+// ------------------------------------------------------------------
+// Entity type name resolver
+// ------------------------------------------------------------------
+
+static const char *debug_eType_name(int eType) {
+	switch (eType) {
+		case 0: return "ET_GENERAL";
+		case 1: return "ET_PLAYER";
+		case 2: return "ET_ITEM";
+		case 3: return "ET_MISSILE";
+		case 4: return "ET_MOVER";
+		case 5: return "ET_BEAM";
+		case 6: return "ET_PORTAL";
+		case 7: return "ET_SPEAKER";
+		case 8: return "ET_PUSH_TRIGGER";
+		case 9: return "ET_TELEPORT_TRIGGER";
+		case 10: return "ET_INVISIBLE";
+		case 11: return "ET_GRAPPLE";
+		case 12: return "ET_TEAM";
+		default:
+			if (eType >= 13) return "ET_EVENTS+N";
+			return "unknown";
+	}
+}
+
+// ------------------------------------------------------------------
+// Configstring index decoder
+// ------------------------------------------------------------------
+
+// CS layout: 0=SERVERINFO, 1=SYSTEMINFO, 2=MUSIC, 3=MESSAGE,
+// 32..287=MODELS(256), 288..543=SOUNDS(256), 544..607=PLAYERS(64),
+// 608..671=LOCATIONS, 672..735=PARTICLES
+
+static void debug_cs_decode_index(jsonBuf_t *jb, int idx) {
+	if (idx == 0) { jb_str(jb, "meaning", "CS_SERVERINFO"); }
+	else if (idx == 1) { jb_str(jb, "meaning", "CS_SYSTEMINFO"); }
+	else if (idx == 2) { jb_str(jb, "meaning", "CS_MUSIC"); }
+	else if (idx == 3) { jb_str(jb, "meaning", "CS_MESSAGE"); }
+	else if (idx == 8) { jb_str(jb, "meaning", "CS_VOTE_TIME"); }
+	else if (idx == 9) { jb_str(jb, "meaning", "CS_VOTE_STRING"); }
+	else if (idx == 20) { jb_str(jb, "meaning", "CS_GAME_VERSION"); }
+	else if (idx == 21) { jb_str(jb, "meaning", "CS_LEVEL_START_TIME"); }
+	else if (idx == 23) { jb_str(jb, "meaning", "CS_FLAGSTATUS"); }
+	else if (idx == 24) { jb_str(jb, "meaning", "CS_SHADERSTATE"); }
+	else if (idx == 25) { jb_str(jb, "meaning", "CS_BOTINFO"); }
+	else if (idx == 27) { jb_str(jb, "meaning", "CS_ITEMS"); }
+	else if (idx >= 32 && idx < 32 + 256) {
+		jb_printf(jb, "\"meaning\":\"CS_MODELS[%d]\"", idx - 32);
+	} else if (idx >= 288 && idx < 288 + 256) {
+		jb_printf(jb, "\"meaning\":\"CS_SOUNDS[%d]\"", idx - 288);
+	} else if (idx >= 544 && idx < 544 + 64) {
+		jb_printf(jb, "\"meaning\":\"CS_PLAYERS[%d]\"", idx - 544);
+	} else if (idx >= 608 && idx < 608 + 64) {
+		jb_printf(jb, "\"meaning\":\"CS_LOCATIONS[%d]\"", idx - 608);
+	} else if (idx >= 672 && idx < 672 + 64) {
+		jb_printf(jb, "\"meaning\":\"CS_PARTICLES[%d]\"", idx - 672);
+	}
+}
+
+// ------------------------------------------------------------------
+// Annotated configstrings — with decoded index names
+// ------------------------------------------------------------------
+
+static void debug_cmd_configstrings_annotated(jsonBuf_t *jb, int startIdx, int endIdx) {
+	jb_raw(jb, "{");
+	jb_str(jb, "type", "configstrings");
+
+	if (endIdx <= 0 || endIdx > MAX_CONFIGSTRINGS) endIdx = MAX_CONFIGSTRINGS;
+	if (startIdx < 0) startIdx = 0;
+
+	jb_raw(jb, ",\"strings\":[");
+	int first = 1;
+	int i;
+	for (i = startIdx; i < endIdx; i++) {
+		if (!sv.configstrings[i] || !sv.configstrings[i][0]) continue;
+		if (!first) jb_raw(jb, ",");
+		first = 0;
+		jb_raw(jb, "{");
+		jb_int(jb, "index", i);
+		jb_raw(jb, ",");
+		debug_cs_decode_index(jb, i);
+		jb_raw(jb, ",");
+		jb_str(jb, "value", sv.configstrings[i]);
+		jb_raw(jb, "}");
+	}
+	jb_raw(jb, "]}\n");
+}
+
+// ------------------------------------------------------------------
+// Resolve modelindex to model name via configstrings
+// ------------------------------------------------------------------
+
+static const char *debug_resolve_modelindex(int modelindex) {
+	if (modelindex <= 0) return "";
+	int csIdx = 32 + modelindex; // CS_MODELS = 32
+	if (csIdx >= MAX_CONFIGSTRINGS) return "";
+	if (!sv.configstrings[csIdx]) return "";
+	return sv.configstrings[csIdx];
+}
+
+static const char *debug_resolve_soundindex(int soundindex) {
+	if (soundindex <= 0) return "";
+	int csIdx = 288 + soundindex; // CS_SOUNDS = 288
+	if (csIdx >= MAX_CONFIGSTRINGS) return "";
+	if (!sv.configstrings[csIdx]) return "";
+	return sv.configstrings[csIdx];
+}
+
+// ------------------------------------------------------------------
+// Annotated entity list — with type names and resolved models
+// ------------------------------------------------------------------
+
+static void debug_cmd_entities_annotated(jsonBuf_t *jb, qboolean activeOnly) {
+	jb_raw(jb, "{");
+	jb_str(jb, "type", "entity_list_annotated");
+	jb_raw(jb, ",");
+	jb_int(jb, "total", sv.num_entities);
+	jb_raw(jb, ",\"entities\":[");
+
+	if (sv.gentities) {
+		int first = 1;
+		int i;
+		for (i = 0; i < sv.num_entities; i++) {
+			sharedEntity_t *ent = SV_GentityNum(i);
+			if (activeOnly && !ent->r.linked) continue;
+
+			if (!first) jb_raw(jb, ",");
+			first = 0;
+
+			const char *modelName = debug_resolve_modelindex(ent->s.modelindex);
+			const char *soundName = debug_resolve_soundindex(ent->s.loopSound);
+
+			jb_raw(jb, "{");
+			jb_int(jb, "num", i);
+			jb_raw(jb, ","); jb_str(jb, "eTypeName", debug_eType_name(ent->s.eType));
+			jb_raw(jb, ","); jb_int(jb, "eType", ent->s.eType);
+			jb_raw(jb, ","); jb_bool(jb, "linked", ent->r.linked);
+			jb_raw(jb, ","); jb_vec3(jb, "origin", ent->s.origin);
+			jb_raw(jb, ","); jb_int(jb, "modelindex", ent->s.modelindex);
+			if (modelName[0]) { jb_raw(jb, ","); jb_str(jb, "modelName", modelName); }
+			if (soundName[0]) { jb_raw(jb, ","); jb_str(jb, "loopSoundName", soundName); }
+			jb_raw(jb, ","); jb_int(jb, "svFlags", ent->r.svFlags);
+			jb_raw(jb, ","); jb_int(jb, "weapon", ent->s.weapon);
+			jb_raw(jb, ","); jb_int(jb, "contents", ent->r.contents);
+			jb_raw(jb, "}");
+		}
+	}
+
+	jb_raw(jb, "]}\n");
+}
+
+// ------------------------------------------------------------------
+// Annotated single entity — full dump with all name resolutions
+// ------------------------------------------------------------------
+
+static void debug_cmd_entity_annotated(jsonBuf_t *jb, int num) {
+	jb_raw(jb, "{");
+	jb_str(jb, "type", "entity_annotated");
+
+	if (!sv.gentities || num < 0 || num >= sv.num_entities) {
+		jb_raw(jb, ","); jb_str(jb, "error", "invalid entity number");
+		jb_raw(jb, "}\n");
+		return;
+	}
+
+	sharedEntity_t *ent = SV_GentityNum(num);
+	jb_raw(jb, ","); jb_int(jb, "num", num);
+	jb_raw(jb, ","); jb_str(jb, "eTypeName", debug_eType_name(ent->s.eType));
+
+	const char *mn = debug_resolve_modelindex(ent->s.modelindex);
+	if (mn[0]) { jb_raw(jb, ","); jb_str(jb, "modelName", mn); }
+	const char *mn2 = debug_resolve_modelindex(ent->s.modelindex2);
+	if (mn2[0]) { jb_raw(jb, ","); jb_str(jb, "model2Name", mn2); }
+	const char *sn = debug_resolve_soundindex(ent->s.loopSound);
+	if (sn[0]) { jb_raw(jb, ","); jb_str(jb, "loopSoundName", sn); }
+
+	// Include the full s and r dumps
+	jb_raw(jb, ",");
+	debug_write_entityState(jb, &ent->s);
+	jb_raw(jb, ",");
+	debug_write_entityShared(jb, &ent->r);
+
+	svEntity_t *sve = &sv.svEntities[num];
+	jb_raw(jb, ",\"sv\":{");
+	jb_int(jb, "numClusters", sve->numClusters);
+	jb_raw(jb, ","); jb_int(jb, "snapshotCounter", sve->snapshotCounter);
+	jb_raw(jb, ","); jb_int(jb, "areanum", sve->areanum);
+	jb_raw(jb, "}");
+
+	jb_raw(jb, "}\n");
+}
+
+// ------------------------------------------------------------------
+// Teleport entity — move origin + zero velocity + relink
+// ------------------------------------------------------------------
+
+static void debug_cmd_teleport(jsonBuf_t *jb, int num, const char *posStr) {
+	jb_raw(jb, "{");
+	jb_str(jb, "type", "teleport");
+
+	if (!sv.gentities || num < 0 || num >= sv.num_entities) {
+		jb_raw(jb, ","); jb_str(jb, "error", "invalid entity number");
+		jb_raw(jb, "}\n");
+		return;
+	}
+
+	vec3_t pos = {0,0,0};
+	sscanf(posStr, "%f,%f,%f", &pos[0], &pos[1], &pos[2]);
+
+	sharedEntity_t *ent = SV_GentityNum(num);
+
+	vec3_t oldOrigin;
+	VectorCopy(ent->s.origin, oldOrigin);
+
+	// Set all origin representations
+	VectorCopy(pos, ent->s.origin);
+	VectorCopy(pos, ent->s.pos.trBase);
+	VectorCopy(pos, ent->r.currentOrigin);
+	ent->s.pos.trType = TR_STATIONARY;
+	ent->s.pos.trTime = sv.time;
+	VectorClear(ent->s.pos.trDelta);
+
+	// If this is a player entity, also update playerState
+	if (num < sv_maxclients->integer && sv.gameClients) {
+		playerState_t *ps = SV_GameClientNum(num);
+		VectorCopy(pos, ps->origin);
+		VectorClear(ps->velocity);
+	}
+
+	if (ent->r.linked) {
+		SV_LinkEntity(ent);
+	}
+
+	jb_raw(jb, ","); jb_int(jb, "num", num);
+	jb_raw(jb, ","); jb_vec3(jb, "oldOrigin", oldOrigin);
+	jb_raw(jb, ","); jb_vec3(jb, "newOrigin", pos);
+	jb_raw(jb, "}\n");
+}
+
+// ------------------------------------------------------------------
+// Multi-command batch — execute array of commands, return array
+// ------------------------------------------------------------------
+
+static void debug_handle_batch(debugClient_t *client, const char *json);
+
+// ------------------------------------------------------------------
 // Command dispatch
 // ------------------------------------------------------------------
 
@@ -2087,7 +2781,7 @@ static void debug_handle_command(debugClient_t *client, const char *json) {
 	} else if (!strcmp(cmd.cmd, "cvarlist")) {
 		debug_cmd_cvarlist(&jb, cmd.strArg1);
 	} else if (!strcmp(cmd.cmd, "configstrings")) {
-		debug_cmd_configstrings(&jb, cmd.intArg1, cmd.hasIntArg2 ? cmd.intArg2 : 0);
+		debug_cmd_configstrings_annotated(&jb, cmd.intArg1, cmd.hasIntArg2 ? cmd.intArg2 : 0);
 	} else if (!strcmp(cmd.cmd, "log")) {
 		debug_cmd_log(&jb, cmd.intArg1, cmd.hasIntArg2 ? cmd.intArg2 : 100, cmd.strArg1);
 	} else if (!strcmp(cmd.cmd, "set_entity")) {
@@ -2114,6 +2808,30 @@ static void debug_handle_command(debugClient_t *client, const char *json) {
 		debug_cmd_peek(&jb, cmd.intArg1, cmd.hasIntArg2 ? cmd.intArg2 : 0, 64);
 	} else if (!strcmp(cmd.cmd, "point_contents")) {
 		debug_cmd_point_contents(&jb, &cmd);
+	} else if (!strcmp(cmd.cmd, "strings")) {
+		debug_cmd_strings(&jb, cmd.intArg1);
+	} else if (!strcmp(cmd.cmd, "funcscan")) {
+		debug_cmd_funcscan(&jb, cmd.intArg1);
+	} else if (!strcmp(cmd.cmd, "bulkscan")) {
+		debug_cmd_bulkscan(&jb, cmd.intArg1, cmd.hasIntArg2 ? cmd.intArg2 : 4,
+			cmd.hasBoolArg1 ? cmd.boolArg1 : qfalse);
+	} else if (!strcmp(cmd.cmd, "client_peek")) {
+		debug_cmd_client_peek(&jb, cmd.intArg1, cmd.hasIntArg2 ? cmd.intArg2 : 0, 64);
+	} else if (!strcmp(cmd.cmd, "client_strings")) {
+		debug_cmd_client_strings(&jb, cmd.intArg1);
+	} else if (!strcmp(cmd.cmd, "entities_annotated")) {
+		debug_cmd_entities_annotated(&jb, cmd.hasBoolArg1 ? cmd.boolArg1 : qfalse);
+	} else if (!strcmp(cmd.cmd, "entity_annotated")) {
+		debug_cmd_entity_annotated(&jb, cmd.intArg1);
+	} else if (!strcmp(cmd.cmd, "teleport")) {
+		debug_cmd_teleport(&jb, cmd.intArg1, cmd.strArg1);
+	} else if (!strcmp(cmd.cmd, "batch")) {
+		// Handled specially — see debug_handle_batch
+		jb_raw(&jb, "{");
+		jb_str(&jb, "type", "error");
+		jb_raw(&jb, ",");
+		jb_str(&jb, "error", "batch must be sent as a JSON array, not an object");
+		jb_raw(&jb, "}\n");
 	} else if (!strcmp(cmd.cmd, "ping")) {
 		jb_raw(&jb, "{\"type\":\"pong\"}\n");
 	} else {
@@ -2122,11 +2840,72 @@ static void debug_handle_command(debugClient_t *client, const char *json) {
 		jb_raw(&jb, ",");
 		jb_str(&jb, "error", "unknown command");
 		jb_raw(&jb, ",");
-		jb_str(&jb, "available", "status, entity, entities, player, layout, validate, search, cvar, cvarlist, configstrings, log, exec, set_entity, set_player, trace, entities_in_box, watch, vmtrace, memory, time, maplist, snapshot, peek, point_contents, ping");
+		jb_str(&jb, "available", "status, entity, entities, entities_annotated, entity_annotated, player, layout, validate, search, cvar, cvarlist, configstrings, log, exec, set_entity, set_player, trace, entities_in_box, watch, vmtrace, memory, time, maplist, snapshot, peek, point_contents, strings, funcscan, bulkscan, client_peek, client_strings, teleport, batch, ping");
 		jb_raw(&jb, "}\n");
 	}
 
 	client->sendLen += jb.len;
+}
+
+// ------------------------------------------------------------------
+// Batch handler — parse JSON array, execute each, wrap in array
+// ------------------------------------------------------------------
+
+static void debug_handle_batch(debugClient_t *client, const char *json) {
+	// Prepend "[" to output
+	if (client->sendLen < DEBUG_SEND_BUF - 1) {
+		client->sendBuf[client->sendLen++] = '[';
+	}
+
+	// Walk the array: find each {...} object and dispatch it
+	const char *p = json;
+	if (*p == '[') p++;
+	int first = 1;
+	int depth = 0;
+	const char *objStart = NULL;
+
+	while (*p) {
+		if (*p == '{' && depth == 0) {
+			objStart = p;
+			depth = 1;
+		} else if (*p == '{') {
+			depth++;
+		} else if (*p == '}') {
+			depth--;
+			if (depth == 0 && objStart) {
+				// Extract this object
+				int objLen = (int)(p - objStart + 1);
+				char objBuf[DEBUG_RECV_BUF];
+				if (objLen < (int)sizeof(objBuf)) {
+					memcpy(objBuf, objStart, objLen);
+					objBuf[objLen] = '\0';
+
+					if (!first && client->sendLen < DEBUG_SEND_BUF - 1) {
+						client->sendBuf[client->sendLen++] = ',';
+					}
+					first = 0;
+
+					// The command handler appends to sendBuf with a trailing \n
+					// We need to replace that \n with nothing (it's inside our array)
+					int beforeLen = client->sendLen;
+					debug_handle_command(client, objBuf);
+					// Remove trailing \n that the handler added
+					if (client->sendLen > beforeLen &&
+						client->sendBuf[client->sendLen - 1] == '\n') {
+						client->sendLen--;
+					}
+				}
+				objStart = NULL;
+			}
+		}
+		p++;
+	}
+
+	// Close array + newline
+	if (client->sendLen < DEBUG_SEND_BUF - 2) {
+		client->sendBuf[client->sendLen++] = ']';
+		client->sendBuf[client->sendLen++] = '\n';
+	}
 }
 
 // ------------------------------------------------------------------
@@ -2308,7 +3087,9 @@ void DebugServer_Frame(void) {
 					*nl = '\0';
 					// Trim \r if present
 					if (nl > line && *(nl-1) == '\r') *(nl-1) = '\0';
-					if (line[0] != '\0') {
+					if (line[0] == '[') {
+						debug_handle_batch(client, line);
+					} else if (line[0] != '\0') {
 						debug_handle_command(client, line);
 					}
 					line = nl + 1;

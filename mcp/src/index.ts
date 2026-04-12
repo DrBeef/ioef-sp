@@ -187,7 +187,7 @@ function formatJson(obj: unknown): string {
 
 const server = new McpServer({
   name: "ioef-game-inspector",
-  version: "1.1.0",
+  version: "1.2.0",
 });
 
 // -- game_status ------------------------------------------------------------
@@ -766,6 +766,203 @@ server.tool(
   },
   async ({ point }) => {
     const result = await queryGame({ cmd: "point_contents", str1: point });
+    return { content: [{ type: "text", text: formatJson(result) }] };
+  }
+);
+
+// -- entity_strings -----------------------------------------------------------
+
+server.tool(
+  "entity_strings",
+  "Scan an entity's full memory (including private game module data beyond sharedEntity_t) for string pointers. Finds classname, targetname, model paths, script names, etc. by dereferencing pointer-like int32 values and checking if they point to readable ASCII strings. Essential for identifying what an entity IS.",
+  {
+    entity_num: z.number().int().describe("Entity number to scan"),
+  },
+  async ({ entity_num }) => {
+    const result = await queryGame({ cmd: "strings", num: entity_num });
+    return { content: [{ type: "text", text: formatJson(result) }] };
+  }
+);
+
+// -- entity_funcscan ----------------------------------------------------------
+
+server.tool(
+  "entity_funcscan",
+  "Scan an entity's private memory for function pointers — addresses within the game DLL's code range. Finds think, touch, use, die, reached, blocked, pain callbacks. The DLL code range is auto-detected from entity 0 (worldspawn). Cross-reference returned addresses with the decompiled function map to identify which callback is assigned.",
+  {
+    entity_num: z.number().int().describe("Entity number to scan"),
+  },
+  async ({ entity_num }) => {
+    const result = await queryGame({ cmd: "funcscan", num: entity_num });
+    return { content: [{ type: "text", text: formatJson(result) }] };
+  }
+);
+
+// -- bulk_field_scan ----------------------------------------------------------
+
+server.tool(
+  "bulk_field_scan",
+  "Read the same byte offset across ALL entities and report distinct values with counts. Powerful for discovering what a field means — e.g., scanning offset 312 across all entities might reveal it's 'health' (values cluster around 100, 250, 0). String pointer values are auto-resolved. Function pointer values are flagged. Returns first 64 per-entity values for detailed analysis.",
+  {
+    offset: z.number().int().describe("Byte offset into the gentity_t struct to read"),
+    width: z.number().int().default(4).describe("Field width: 1 (byte), 2 (short), or 4 (int32). Default: 4"),
+    active_only: z.boolean().default(false).describe("Only scan linked/active entities (default: false — scan all)"),
+  },
+  async ({ offset, width, active_only }) => {
+    const result = await queryGame({ cmd: "bulkscan", num: offset, value: width, active_only });
+    return { content: [{ type: "text", text: formatJson(result) }] };
+  }
+);
+
+// -- client_peek --------------------------------------------------------------
+
+server.tool(
+  "client_peek",
+  "Read raw bytes from a game client's memory (gclient_t). Similar to memory_peek but for client data. The first playerState_t-sized bytes are the player state; bytes after that are the game module's private client fields (clientPersistant_t, session data, NPC state, etc.). Returns hex, int32, float, and string interpretations.",
+  {
+    client_num: z.number().int().describe("Client number (0 to maxclients-1)"),
+    offset: z.number().int().default(0).describe("Byte offset into gclient_t (0 = start of playerState_t)"),
+  },
+  async ({ client_num, offset }) => {
+    const result = await queryGame({ cmd: "client_peek", num: client_num, value: offset });
+    return { content: [{ type: "text", text: formatJson(result) }] };
+  }
+);
+
+// -- client_strings -----------------------------------------------------------
+
+server.tool(
+  "client_strings",
+  "Scan a game client's full memory for string pointers. Finds netname, model path, userinfo strings, and other client-side data by dereferencing pointers in the gclient_t struct.",
+  {
+    client_num: z.number().int().describe("Client number (0 to maxclients-1)"),
+  },
+  async ({ client_num }) => {
+    const result = await queryGame({ cmd: "client_strings", num: client_num });
+    return { content: [{ type: "text", text: formatJson(result) }] };
+  }
+);
+
+// -- list_entities_annotated ---------------------------------------------------
+
+server.tool(
+  "list_entities_annotated",
+  "List all entities with human-readable annotations — entity type names (ET_ITEM, ET_PLAYER, etc.), resolved model paths from configstrings, and loop sound names. Much more readable than raw list_entities.",
+  {
+    active_only: z
+      .boolean()
+      .default(true)
+      .describe("If true, only return linked/active entities (default: true)"),
+  },
+  async ({ active_only }) => {
+    const result = await queryGame({ cmd: "entities_annotated", active_only });
+    return { content: [{ type: "text", text: formatJson(result) }] };
+  }
+);
+
+// -- inspect_entity_annotated -------------------------------------------------
+
+server.tool(
+  "inspect_entity_annotated",
+  "Get full entity state with human-readable annotations — type name, model path resolved from configstrings, sound name. Includes all entityState_t and entityShared_t fields plus engine svEntity_t data.",
+  {
+    num: z.number().int().describe("Entity number"),
+  },
+  async ({ num }) => {
+    const result = await queryGame({ cmd: "entity_annotated", num });
+    return { content: [{ type: "text", text: formatJson(result) }] };
+  }
+);
+
+// -- teleport_entity ----------------------------------------------------------
+
+server.tool(
+  "teleport_entity",
+  "Instantly move an entity to a new position. Sets origin, pos.trBase, currentOrigin, zeros velocity, sets trajectory to stationary, and re-links the entity. For player entities, also updates playerState origin and zeros velocity.",
+  {
+    num: z.number().int().describe("Entity number to teleport"),
+    position: z
+      .string()
+      .describe("Target position as 'x,y,z' (e.g. '0,-1438,-300')"),
+  },
+  async ({ num, position }) => {
+    const result = await queryGame({ cmd: "teleport", num, str1: position });
+    return { content: [{ type: "text", text: formatJson(result) }] };
+  }
+);
+
+// -- batch_commands -----------------------------------------------------------
+
+server.tool(
+  "batch_commands",
+  "Execute multiple debug commands in a single TCP round-trip. Pass an array of command objects. Returns an array of results in the same order. Much faster than calling tools one at a time when you need multiple pieces of data.",
+  {
+    commands: z
+      .array(z.record(z.string(), z.unknown()))
+      .describe(
+        "Array of command objects, e.g. [{\"cmd\":\"status\"}, {\"cmd\":\"entity\",\"num\":0}, {\"cmd\":\"cvar\",\"name\":\"sv_fps\"}]"
+      ),
+  },
+  async ({ commands }) => {
+    // Send as JSON array on one line
+    const batchStr = JSON.stringify(commands);
+    const result = await new Promise((resolve, reject) => {
+      const socket = new net.Socket();
+      let buffer = "";
+      let settled = false;
+
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          socket.destroy();
+          reject(new Error("Timeout waiting for batch response"));
+        }
+      }, 10000); // longer timeout for batch
+
+      socket.setTimeout(CONNECT_TIMEOUT);
+
+      socket.on("connect", () => {
+        socket.write(batchStr + "\n");
+      });
+
+      socket.on("data", (data) => {
+        buffer += data.toString();
+        const nlIdx = buffer.indexOf("\n");
+        if (nlIdx !== -1) {
+          const line = buffer.slice(0, nlIdx).trim();
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            socket.destroy();
+            try {
+              resolve(JSON.parse(line));
+            } catch {
+              resolve({ raw: line });
+            }
+          }
+        }
+      });
+
+      socket.on("timeout", () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          socket.destroy();
+          reject(new Error("Connection timeout"));
+        }
+      });
+
+      socket.on("error", (err) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          reject(new Error(`Batch failed: ${err.message}`));
+        }
+      });
+
+      socket.connect(GAME_PORT, GAME_HOST);
+    });
+
     return { content: [{ type: "text", text: formatJson(result) }] };
   }
 );

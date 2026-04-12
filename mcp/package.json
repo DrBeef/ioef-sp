@@ -1,7 +1,7 @@
 {
   "name": "ioef-game-inspector",
-  "version": "1.0.0",
-  "description": "MCP server for live ioEF game engine inspection - entity state, memory layouts, struct validation",
+  "version": "1.2.0",
+  "description": "MCP server for live ioEF game engine inspection — entity state, memory probing, string/function pointer discovery, struct validation",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {

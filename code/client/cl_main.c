@@ -2416,6 +2416,12 @@ void CL_CheckForResend( void ) {
 	clc.connectTime = cls.realtime;	// for retransmit requests
 	clc.connectPacketCount++;
 
+#ifdef ELITEFORCE
+	// Update the SP UI connection screen with the current retry count
+	if ( CL_SP_IsUIActive() ) {
+		CL_SP_UIUpdateConnectionString( va( "%i", clc.connectPacketCount ) );
+	}
+#endif
 
 	switch ( clc.state ) {
 	case CA_CONNECTING:
@@ -2864,9 +2870,15 @@ void CL_ConnectionlessPacket( netadr_t from, msg_t *msg ) {
 	// echo request from server
 	if(!Q_stricmp(c, "print")){
 		s = MSG_ReadString( msg );
-		
+
 		Q_strncpyz( clc.serverMessage, s, sizeof( clc.serverMessage ) );
 		Com_Printf( "%s", s );
+
+#ifdef ELITEFORCE
+		if ( CL_SP_IsUIActive() ) {
+			CL_SP_UIUpdateConnectionMessageString( s );
+		}
+#endif
 
 		return;
 	}
