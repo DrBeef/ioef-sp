@@ -415,17 +415,6 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 		re.AddLightToScene( VMA(1), VMF(2), VMF(3), VMF(4), VMF(5) );
 		return 0;
 	case SPCG_R_RENDERSCENE: {
-		/* Debug spew: log the first few RenderScene calls to help diagnose
-		   viewport and camera issues during SP cgame bringup.  Limited to
-		   3 prints to avoid flooding the console during normal play. */
-		static int rsCount = 0;
-		if ( rsCount < 3 ) {
-			refdef_t *rd = (refdef_t *)VMA(1);
-			Com_Printf( "RenderScene: viewport(%d %d %d %d) fov(%.1f %.1f) org(%.1f %.1f %.1f) flags=%d\n",
-				rd->x, rd->y, rd->width, rd->height, rd->fov_x, rd->fov_y,
-				rd->vieworg[0], rd->vieworg[1], rd->vieworg[2], rd->rdflags );
-			rsCount++;
-		}
 		re.RenderScene( VMA(1) );
 		return 0;
 	}
@@ -576,17 +565,9 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 		   all SP-specific fields (leanofs, borgAdaptHits, pushVec, etc.)
 		   that would be lost if we tried to translate from ioEF playerState_t. */
 		{
-			static int dbgCount = 0;
 			void *rawPS = SV_SP_GetRawPlayerState();
 			if ( rawPS ) {
 				Com_Memcpy( &spSnap->ps, rawPS, sizeof( sp_playerState_t ) );
-				if ( dbgCount < 3 ) {
-					Com_Printf( "SP snap: origin(%.1f %.1f %.1f) angles(%.1f %.1f %.1f) vh=%d ents=%d sTime=%d\n",
-						spSnap->ps.origin[0], spSnap->ps.origin[1], spSnap->ps.origin[2],
-						spSnap->ps.viewangles[0], spSnap->ps.viewangles[1], spSnap->ps.viewangles[2],
-						spSnap->ps.viewheight, tempSnap.numEntities, spSnap->serverTime );
-					dbgCount++;
-				}
 			} else {
 				Com_Memset( &spSnap->ps, 0, sizeof( sp_playerState_t ) );
 			}
