@@ -406,37 +406,18 @@ void SV_SpawnServer( char *server, qboolean killBots ) {
 	char		systemInfo[16384];
 	const char	*p;
 
-#ifdef ELITEFORCE
-	/*
-	 * In SP mode, the client cgame and server game share a single DLL
-	 * (efgamex86.dll).  The cgame MUST be shut down before the server
-	 * game calls ge->Shutdown(), because the cgame's CG_SHUTDOWN handler
-	 * may access game state that ge->Shutdown() frees.  Shut down the
-	 * client first, then the server game.
-	 */
-	if ( SV_SP_IsActive() ) {
-		CL_MapLoading();
-		CL_ShutdownAll( qfalse );
-	}
-#endif
-
 	// shut down the existing game if it is running
 	SV_ShutdownGameProgs();
 
 	Com_Printf ("------ Server Initialization ------\n");
 	Com_Printf ("Server: %s\n",server);
 
-#ifdef ELITEFORCE
-	if ( !Cvar_VariableIntegerValue( "sp_game" ) ) {
-#endif
 	// if not running a dedicated server CL_MapLoading will connect the client to the server
 	// also print some status stuff
 	CL_MapLoading();
 
 	// make sure all the client stuff is unloaded
 	CL_ShutdownAll(qfalse);
-#ifdef ELITEFORCE
-	}
 #endif
 
 	// clear the whole hunk because we're (re)loading the server
