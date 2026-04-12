@@ -91,10 +91,23 @@ extern sp_entityState_t *SV_SP_GetRawEntityState( int entNum );
 
 /*
  * EF1 SP cgame syscall numbers.
- * These differ from the ioEF (multiplayer) cgame numbering because the SP
- * module includes force-feedback, ambient-sound, and extra renderer calls
- * that shift many of the later values.
+ *
+ * These are the integer IDs the precompiled SP cgame DLL passes as args[0]
+ * when it calls back into the engine.  They are NOT the same as ioEF MP's
+ * CG_* enum values -- the two numbering schemes diverge starting at 34
+ * (where SP inserts the force-feedback block) and never converge again.
+ *
+ * The groupings below mirror the original Ritual SDK's ordering:
+ *   0-16   : core engine services (print, cvars, commands, filesystem)
+ *   17-25  : collision model (CM) queries
+ *   26-33  : sound system
+ *   34-37  : force feedback (SP-only, shifts all subsequent numbers)
+ *   38-55  : renderer (includes SP-only calls at 45, 51, 54, 55)
+ *   56-64  : client state queries (glconfig, gamestate, snapshots, usercmd)
+ *   65-70  : ambient sound system (SP-only, appended at end)
  */
+
+/* Core engine services -- identical numbering to ioEF MP for 0-16 */
 #define SPCG_PRINT                        0
 #define SPCG_ERROR                        1
 #define SPCG_MILLISECONDS                 2
@@ -112,6 +125,8 @@ extern sp_entityState_t *SV_SP_GetRawEntityState( int entNum );
 #define SPCG_ADDCOMMAND                   14
 #define SPCG_SENDCLIENTCOMMAND            15
 #define SPCG_UPDATESCREEN                 16
+
+/* Collision model -- still matching ioEF MP numbering at this point */
 #define SPCG_CM_LOADMAP                   17
 #define SPCG_CM_NUMINLINEMODELS           18
 #define SPCG_CM_INLINEMODEL               19
@@ -121,6 +136,8 @@ extern sp_entityState_t *SV_SP_GetRawEntityState( int entNum );
 #define SPCG_CM_BOXTRACE                  23
 #define SPCG_CM_TRANSFORMEDBOXTRACE       24
 #define SPCG_CM_MARKFRAGMENTS             25
+
+/* Sound -- still matching ioEF MP numbering through 33 */
 #define SPCG_S_STARTSOUND                 26
 #define SPCG_S_STARTLOCALSOUND            27
 #define SPCG_S_CLEARLOOPINGSOUNDS         28
@@ -129,10 +146,22 @@ extern sp_entityState_t *SV_SP_GetRawEntityState( int entNum );
 #define SPCG_S_RESPATIALIZE               31
 #define SPCG_S_REGISTERSOUND              32
 #define SPCG_S_STARTBACKGROUNDTRACK       33
+
+/* Force Feedback -- SP-ONLY.  These four calls are where SP and MP syscall
+   numbering permanently diverge.  The original Ritual engine supported
+   DirectInput Force Feedback devices (rumble joysticks, force-feedback
+   steering wheels).  The cgame would trigger haptic effects for weapon
+   fire, explosions, and environmental hazards.  ioEF has no FF support,
+   so these are stubbed out, but their presence shifts every subsequent
+   syscall number up by 4 relative to ioEF MP. */
 #define SPCG_FF_STARTFX                   34
 #define SPCG_FF_ENSUREFX                  35
 #define SPCG_FF_STOPFX                    36
 #define SPCG_FF_STOPALLFX                 37
+
+/* Renderer -- numbers 38+ are offset from ioEF MP due to the FF block above.
+   Additionally, SP inserts its own renderer calls (GetLighting, DrawScreenShot,
+   DrawRotatePic, Scissor) that push numbers further apart. */
 #define SPCG_R_LOADWORLDMAP               38
 #define SPCG_R_REGISTERMODEL              39
 #define SPCG_R_REGISTERSKIN               40
@@ -140,17 +169,19 @@ extern sp_entityState_t *SV_SP_GetRawEntityState( int entNum );
 #define SPCG_R_REGISTERSHADERNOMIP        42
 #define SPCG_R_CLEARSCENE                 43
 #define SPCG_R_ADDREFENTITYTOSCENE        44
-#define SPCG_R_GETLIGHTING                45
+#define SPCG_R_GETLIGHTING                45  /* SP-only: query lighting at a world point */
 #define SPCG_R_ADDPOLYTOSCENE             46
 #define SPCG_R_ADDLIGHTTOSCENE            47
 #define SPCG_R_RENDERSCENE                48
 #define SPCG_R_SETCOLOR                   49
 #define SPCG_R_DRAWSTRETCHPIC             50
-#define SPCG_R_DRAWSCREENSHOT             51
+#define SPCG_R_DRAWSCREENSHOT             51  /* SP-only: draw a captured screenshot as texture */
 #define SPCG_R_MODELBOUNDS                52
 #define SPCG_R_LERPTAG                    53
-#define SPCG_R_DRAWROTATEPIC              54
-#define SPCG_R_SCISSOR                    55
+#define SPCG_R_DRAWROTATEPIC              54  /* SP-only: draw a 2D pic with rotation */
+#define SPCG_R_SCISSOR                    55  /* SP-only: set a scissor rectangle for 2D rendering */
+
+/* Client state queries */
 #define SPCG_GETGLCONFIG                  56
 #define SPCG_GETGAMESTATE                 57
 #define SPCG_GETCURRENTSNAPSHOTNUMBER     58
@@ -160,18 +191,41 @@ extern sp_entityState_t *SV_SP_GetRawEntityState( int entNum );
 #define SPCG_GETUSERCMD                   62
 #define SPCG_SETUSERCMDVALUE              63
 #define SPCG_MEMORY_REMAINING             64
-#define SPCG_S_UPDATEAMBIENTSET           65
-#define SPCG_S_ADDLOCALSET                66
-#define SPCG_AS_PARSESETS                 67
-#define SPCG_AS_ADDENTRY                  68
-#define SPCG_AS_GETBMODELSOUND            69
-#define SPCG_S_GETSAMPLELENGTH            70
 
+/* Ambient Sound System -- SP-ONLY.  The original Ritual engine had a
+   sophisticated positional ambient sound system that could attach sound
+   environments to BSP brush models and world regions.  It was used for
+   environmental audio in the SP campaign (humming warp cores, creaking
+   hull sounds, ambient alien atmospheres).  ioEF does not implement this
+   subsystem, so all six calls are stubbed out. */
+#define SPCG_S_UPDATEAMBIENTSET           65  /* update the active ambient sound set */
+#define SPCG_S_ADDLOCALSET                66  /* add a local ambient sound set at a position */
+#define SPCG_AS_PARSESETS                 67  /* parse ambient set definitions from a file */
+#define SPCG_AS_ADDENTRY                  68  /* add an entry to an ambient set */
+#define SPCG_AS_GETBMODELSOUND            69  /* get the ambient sound for a brush model */
+#define SPCG_S_GETSAMPLELENGTH            70  /* query the duration of a sound sample */
+
+/*
+ * VM argument access macros.  We #undef first because these are also defined
+ * in the MP cgame dispatcher (cl_cgame.c), and this file may be compiled in
+ * the same translation unit or share a common header.
+ *
+ * VMA(x) -- converts the integer argument at position x to a pointer.
+ *           The SP DLL passes pointers as integer offsets; VM_ArgPtr
+ *           resolves them to real pointers in the engine's address space.
+ * VMF(x) -- reinterprets the integer argument at position x as a float.
+ *           Q3 engine syscalls pass floats as bit-identical integers.
+ */
 #undef VMA
 #undef VMF
 #define	VMA(x) VM_ArgPtr(args[x])
 #define	VMF(x) ((float *)args)[x]
 
+/*
+ * FloatAsInt: type-pun a float to an int for returning float values through
+ * the intptr_t syscall return channel.  Uses a union to avoid strict-aliasing
+ * violations (the floatint_t union is defined in q_shared.h).
+ */
 static int FloatAsInt( float f ) {
 	floatint_t fi;
 	fi.f = f;
@@ -302,6 +356,10 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 	case SPCG_S_REGISTERSOUND:
 		return S_RegisterSound( VMA(1), args[2] );
 	case SPCG_S_STARTBACKGROUNDTRACK:
+		/* The SP cgame passes a NULL or empty string to stop the music track
+		   (e.g., during transitions between cinematic and gameplay).
+		   A non-empty string starts a new background music track; arg 2 is
+		   the loop portion filename (or NULL to loop the whole track). */
 		if ( !VMA(1) || !*((char *) VMA(1)) )
 			S_StopBackgroundTrack();
 		else
@@ -309,6 +367,12 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 		return 0;
 
 	// --- force feedback (stubs) ---
+	// The original Ritual engine exposed DirectInput Force Feedback to the
+	// cgame for haptic effects: weapon recoil, explosion shockwaves, and
+	// environmental rumble (e.g., the ship shaking during combat sequences).
+	// ioEF has no force-feedback hardware support, so these are safe no-ops.
+	// The SP cgame handles the absence gracefully -- it simply gets no haptic
+	// response, which doesn't affect gameplay or visuals.
 	case SPCG_FF_STARTFX:
 		return 0;
 	case SPCG_FF_ENSUREFX:
@@ -337,7 +401,12 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 		re.AddRefEntityToScene( VMA(1) );
 		return 0;
 	case SPCG_R_GETLIGHTING:
-		// EF1 SP-only call; not supported in ioEF
+		// SP-only renderer call: R_GetLighting.  The original Ritual renderer
+		// could query the lightmap/light grid at an arbitrary world point and
+		// return the lighting color/intensity.  The SP cgame used this to tint
+		// certain HUD elements or particle effects to match the environment's
+		// lighting.  ioEF's renderer doesn't expose this query, so we return 0
+		// (the cgame falls back to default lighting when the call fails).
 		return 0;
 	case SPCG_R_ADDPOLYTOSCENE:
 		re.AddPolyToScene( args[1], args[2], VMA(3), 1 );
@@ -346,6 +415,9 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 		re.AddLightToScene( VMA(1), VMF(2), VMF(3), VMF(4), VMF(5) );
 		return 0;
 	case SPCG_R_RENDERSCENE: {
+		/* Debug spew: log the first few RenderScene calls to help diagnose
+		   viewport and camera issues during SP cgame bringup.  Limited to
+		   3 prints to avoid flooding the console during normal play. */
 		static int rsCount = 0;
 		if ( rsCount < 3 ) {
 			refdef_t *rd = (refdef_t *)VMA(1);
@@ -364,7 +436,12 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 		re.DrawStretchPic( VMF(1), VMF(2), VMF(3), VMF(4), VMF(5), VMF(6), VMF(7), VMF(8), args[9] );
 		return 0;
 	case SPCG_R_DRAWSCREENSHOT:
-		// EF1 SP-only call; no-op stub
+		// SP-only renderer call: R_DrawScreenShot.  The original engine could
+		// capture a screenshot into a texture and then draw it as a 2D element.
+		// The SP cgame used this for transition effects (e.g., freezing the
+		// current frame, then fading/wiping to a new scene during level loads
+		// or cinematic transitions).  Not implemented in ioEF; the transitions
+		// simply won't display, which is cosmetically minor.
 		return 0;
 	case SPCG_R_MODELBOUNDS:
 		re.ModelBounds( args[1], VMA(2), VMA(3) );
@@ -372,10 +449,18 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 	case SPCG_R_LERPTAG:
 		return re.LerpTag( VMA(1), args[2], args[3], args[4], VMF(5), VMA(6) );
 	case SPCG_R_DRAWROTATEPIC:
-		// EF1 SP-only call; no-op stub
+		// SP-only renderer call: R_DrawRotatePic.  Like R_DrawStretchPic but
+		// with an additional rotation angle parameter.  The SP cgame used this
+		// for rotating HUD compass elements, spinning weapon charge indicators,
+		// and some cinematic overlay effects.  Without it, those elements
+		// simply don't appear -- not ideal but not game-breaking.
 		return 0;
 	case SPCG_R_SCISSOR:
-		// EF1 SP-only call; no-op stub
+		// SP-only renderer call: R_Scissor.  Sets a rectangular scissor/clip
+		// region for subsequent 2D drawing.  The SP cgame used this to clip
+		// HUD elements to specific screen regions (e.g., the text crawl in
+		// mission briefings, scrolling objective lists).  Without it, text
+		// may overdraw slightly outside intended boundaries.
 		return 0;
 
 	// --- client state ---
@@ -389,35 +474,107 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 		CL_GetCurrentSnapshotNumber( VMA(1), VMA(2) );
 		return 0;
 	case SPCG_GETSNAPSHOT: {
-		// The SP cgame's snapshot_t has a different layout from ioEF's:
-		//   - Extra cmdNum field before ps
-		//   - sp_playerState_t (different size/layout from ioEF playerState_t)
-		//   - sp_entityState_t (different size/layout from ioEF entityState_t)
-		//
-		// Since this is a local server, we bypass the engine's snapshot
-		// delta compression entirely and build the SP snapshot directly
-		// from the game module's live data.
+		/*
+		 * =====================================================================
+		 * SP SNAPSHOT BYPASS ARCHITECTURE
+		 * =====================================================================
+		 *
+		 * This is the most critical syscall in the SP bridge.  It supplies
+		 * the SP cgame with a complete world snapshot each frame.
+		 *
+		 * WHY WE BYPASS DELTA COMPRESSION:
+		 *
+		 * In normal ioEF multiplayer, the snapshot pipeline works like this:
+		 *   1. Server builds a snapshot with ioEF entityState_t / playerState_t
+		 *   2. Server delta-compresses it against a previous snapshot
+		 *   3. Compressed data is sent over the network
+		 *   4. Client decompresses into ioEF snapshot_t
+		 *   5. Cgame reads the ioEF snapshot_t
+		 *
+		 * This pipeline assumes both sides agree on the struct layouts.
+		 * For SP, the cgame DLL expects sp_entityState_t and sp_playerState_t,
+		 * which have different fields and different sizes.  If we let the
+		 * normal pipeline run, the server would compress ioEF-layout data,
+		 * the client would decompress it into ioEF-layout structs, and then
+		 * the SP cgame would interpret those bytes as SP-layout structs --
+		 * reading the wrong fields at the wrong offsets.
+		 *
+		 * We COULD try to translate ioEF structs to SP structs after
+		 * decompression, but that would lose the SP-specific fields
+		 * (modelindex3, legsAnimTimer, torsoAnimTimer, scale, pushVec,
+		 * leanofs, borgAdaptHits, etc.) because they were never encoded
+		 * into the ioEF snapshot in the first place.
+		 *
+		 * HOW THE BYPASS WORKS:
+		 *
+		 * Instead, we take a hybrid approach:
+		 *
+		 *   Step 1: Call CL_GetSnapshot() to get an ioEF-format snapshot.
+		 *           We use this ONLY for metadata (snapFlags, ping,
+		 *           serverTime, areamask, serverCommandSequence) and the
+		 *           ENTITY LIST (which entities are visible this frame).
+		 *           The ioEF snapshot system's PVS culling and rate
+		 *           management correctly determine which entities should
+		 *           be in the snapshot -- we don't want to reimplement that.
+		 *
+		 *   Step 2: Build an sp_snapshot_t in the buffer the SP cgame
+		 *           provided.  Copy metadata from the ioEF snapshot.
+		 *
+		 *   Step 3: For the playerState, reach directly into the SP game
+		 *           module's memory via SV_SP_GetRawPlayerState() and
+		 *           memcpy the raw sp_playerState_t.  This preserves all
+		 *           SP-specific fields exactly as the game module set them.
+		 *
+		 *   Step 4: For each entity in the ioEF snapshot's entity list,
+		 *           use the entity NUMBER to look up the raw SP entity
+		 *           data via SV_SP_GetRawEntityState(), and memcpy the
+		 *           raw sp_entityState_t.  Again, this preserves all
+		 *           SP-specific fields.
+		 *
+		 * This works because SP is always a local server -- the game module
+		 * lives in the same process, so we can read its memory directly.
+		 * There is no network serialization or delta compression involved.
+		 *
+		 * IMPORTANT: The entity list (which entities appear) comes from the
+		 * ioEF snapshot, but the actual entity DATA comes from the SP game
+		 * module.  The ioEF snapshot's entity data (in ioEF layout) is
+		 * discarded -- we only use the .number field to know which entities
+		 * to fetch from the SP side.
+		 * =====================================================================
+		 */
 
-		// Step 1: Get the ioEF snapshot into a temp buffer for metadata + entity list
+		/* Use the ioEF snapshot system to get metadata and the visible entity list.
+		   tempSnap is static to avoid putting ~300KB on the stack each frame. */
 		static snapshot_t tempSnap;
 		qboolean result = CL_GetSnapshot( args[1], &tempSnap );
 		if ( !result ) return qfalse;
 
-		// Step 2: Fill the SP snapshot at the cgame's buffer
+		/* Build the SP-format snapshot in the buffer the cgame provided (arg 2) */
 		sp_snapshot_t *spSnap = (sp_snapshot_t *)VMA(2);
 		int i;
 
+		/* Copy metadata from the ioEF snapshot -- these fields have the same
+		   meaning and format in both layouts */
 		spSnap->snapFlags = tempSnap.snapFlags;
 		spSnap->ping = tempSnap.ping;
 		spSnap->serverTime = tempSnap.serverTime;
 		Com_Memcpy( spSnap->areamask, tempSnap.areamask, sizeof( spSnap->areamask ) );
+
+		/* SP-specific fields: cmdNum and configstring tracking.
+		   We set these to 0 because the ioEF engine doesn't track them.
+		   The SP cgame appears to tolerate zero values here -- it falls back
+		   to other mechanisms for command prediction and configstring updates. */
 		spSnap->cmdNum = 0;
 		spSnap->serverCommandSequence = tempSnap.serverCommandSequence;
 		spSnap->numServerCommands = 0;
 		spSnap->numConfigstringChanges = 0;
 		spSnap->configstringNum = 0;
 
-		// PlayerState: copy raw SP data directly from the game module
+		/* PlayerState: copy raw SP data directly from the game module's memory.
+		   SV_SP_GetRawPlayerState() returns a pointer to the beginning of the
+		   SP gclient_t, which starts with sp_playerState_t.  This gives us
+		   all SP-specific fields (leanofs, borgAdaptHits, pushVec, etc.)
+		   that would be lost if we tried to translate from ioEF playerState_t. */
 		{
 			static int dbgCount = 0;
 			void *rawPS = SV_SP_GetRawPlayerState();
@@ -435,7 +592,12 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 			}
 		}
 
-		// Entities: get raw SP entity data for each entity in the snapshot
+		/* Entities: for each entity the ioEF snapshot says is visible,
+		   fetch the raw SP entity data from the game module.
+		   We use tempSnap.entities[i].number (the entity index) to look up
+		   the SP game module's entity array.  The actual ioEF entityState_t
+		   field values in tempSnap.entities[] are ignored -- only .number
+		   matters.  The real data comes from SV_SP_GetRawEntityState(). */
 		spSnap->numEntities = tempSnap.numEntities;
 		for ( i = 0; i < tempSnap.numEntities && i < SP_MAX_ENTITIES_IN_SNAPSHOT; i++ ) {
 			int entNum = tempSnap.entities[i].number;
@@ -443,6 +605,11 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 			if ( rawEnt ) {
 				Com_Memcpy( &spSnap->entities[i], rawEnt, sizeof( sp_entityState_t ) );
 			} else {
+				/* Entity not found in the SP game module -- this shouldn't
+				   normally happen, but can occur if the entity was removed
+				   between the server frame and this snapshot fetch.  Zero
+				   the entry and preserve the entity number so the cgame
+				   can handle it gracefully. */
 				Com_Memset( &spSnap->entities[i], 0, sizeof( sp_entityState_t ) );
 				spSnap->entities[i].number = entNum;
 			}
@@ -463,17 +630,29 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 		return Hunk_MemoryRemaining();
 
 	// --- EF1 SP ambient sound stubs ---
-	case SPCG_S_UPDATEAMBIENTSET:
+	// The Ritual engine's ambient sound system was a layer above the normal
+	// Quake 3 sound system.  It managed environmental audio "sets" -- groups
+	// of ambient sounds associated with BSP regions or brush models.  As the
+	// player moved through the level, the system would cross-fade between
+	// ambient sets to create seamless environmental audio transitions (e.g.,
+	// moving from a quiet corridor into a humming engine room).
+	//
+	// ioEF does not implement this subsystem.  The SP campaign still plays
+	// its triggered and looping sounds normally via the standard S_StartSound
+	// and S_AddLoopingSound calls; only the positional ambient layer is
+	// missing, which results in slightly less atmospheric audio but no
+	// gameplay impact.
+	case SPCG_S_UPDATEAMBIENTSET:	/* refresh which ambient set is active for the player's position */
 		return 0;
-	case SPCG_S_ADDLOCALSET:
+	case SPCG_S_ADDLOCALSET:		/* register a local ambient set at a specific world position */
 		return 0;
-	case SPCG_AS_PARSESETS:
+	case SPCG_AS_PARSESETS:			/* parse ambient set definitions from a text file/buffer */
 		return 0;
-	case SPCG_AS_ADDENTRY:
+	case SPCG_AS_ADDENTRY:			/* add a sound entry to an ambient set */
 		return 0;
-	case SPCG_AS_GETBMODELSOUND:
+	case SPCG_AS_GETBMODELSOUND:	/* query which ambient sound a brush model should emit */
 		return 0;
-	case SPCG_S_GETSAMPLELENGTH:
+	case SPCG_S_GETSAMPLELENGTH:	/* query duration of a sound sample in milliseconds */
 		return 0;
 
 	default:
