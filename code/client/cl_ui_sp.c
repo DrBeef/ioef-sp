@@ -819,7 +819,10 @@ static qboolean CL_SP_UI_SG_GameAllowedToSaveHere( qboolean inCamera ) {
 	if ( ge && ge->GameAllowedToSaveHere ) {
 		return ge->GameAllowedToSaveHere();
 	}
-	return qfalse;
+	// No game module loaded (e.g., at main menu) -- always allow.
+	// The SP UI checks this before showing ANY menu, so returning
+	// false here would block the entire menu system.
+	return qtrue;
 }
 
 /*
@@ -1225,6 +1228,13 @@ intptr_t QDECL CL_SP_UIVmMain( int command, ... ) {
 		char *menuname = NULL;
 		qboolean fullscreen = qfalse;
 		ue->UI_GetActiveMenu( &menuname, &fullscreen );
+		/* If the SP UI's GetActiveMenu doesn't report fullscreen
+		   correctly, check if KEYCATCH_UI is set as a fallback.
+		   This prevents the engine from spamming SetActiveMenu
+		   every frame. */
+		if ( !fullscreen && ( Key_GetCatcher() & KEYCATCH_UI ) ) {
+			fullscreen = qtrue;
+		}
 		return fullscreen;
 	}
 

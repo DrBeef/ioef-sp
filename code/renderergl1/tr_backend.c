@@ -1319,6 +1319,17 @@ const void	*RB_SwapBuffers( const void *data ) {
 		static int probeFrame = 0;
 		static int prevBrightness = 0;
 		probeFrame++;
+		/* Log pixel samples at frame 60 for visual verification */
+		if ( probeFrame == 60 ) {
+			unsigned char c[4]={0}, l[4]={0}, r[4]={0}, bl[4]={0};
+			int w = glConfig.vidWidth, h = glConfig.vidHeight;
+			qglReadPixels( w/2, h/2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, c );
+			qglReadPixels( w/8, h/2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, l );   /* left where menu is */
+			qglReadPixels( 7*w/8, h/2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, r ); /* right side */
+			qglReadPixels( w/4, h/8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, bl );  /* bottom left */
+			ri.Printf( PRINT_ALL, "[PIXELPROBE] f=%d center=(%d,%d,%d) left=(%d,%d,%d) right=(%d,%d,%d) bl=(%d,%d,%d)\n",
+				probeFrame, c[0],c[1],c[2], l[0],l[1],l[2], r[0],r[1],r[2], bl[0],bl[1],bl[2] );
+		}
 		if ( ri.Cvar_VariableIntegerValue( "sp_autotest" ) && (probeFrame & 3) == 0 ) {
 			unsigned char px[9][4];
 			int w = glConfig.vidWidth, h = glConfig.vidHeight;
