@@ -1322,23 +1322,6 @@ const void	*RB_SwapBuffers( const void *data ) {
 		}
 	}
 
-	// Expose pixel colors at multiple positions via cvar for MCP inspection
-	{
-		static int pixelFrame = 0;
-		pixelFrame++;
-		if ( (pixelFrame % 60) == 0 ) {
-			unsigned char c[4], tl[4], tr[4], bl[4], br[4];
-			int w = glConfig.vidWidth, h = glConfig.vidHeight;
-			qglReadPixels( w/2, h/2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, c );
-			qglReadPixels( w/4, 3*h/4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, tl );
-			qglReadPixels( 3*w/4, 3*h/4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, tr );
-			qglReadPixels( w/4, h/4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, bl );
-			qglReadPixels( 3*w/4, h/4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, br );
-			ri.Cvar_Set( "r_debugPixel", va("C:%d,%d,%d TL:%d,%d,%d TR:%d,%d,%d BL:%d,%d,%d BR:%d,%d,%d",
-				c[0],c[1],c[2], tl[0],tl[1],tl[2], tr[0],tr[1],tr[2], bl[0],bl[1],bl[2], br[0],br[1],br[2]) );
-		}
-	}
-
 	GLimp_EndFrame();
 
 	backEnd.projection2D = qfalse;

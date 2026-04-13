@@ -1094,6 +1094,34 @@ void CL_SetCGameTime( void ) {
 		Com_Error( ERR_DROP, "CL_SetCGameTime: !cl.snap.valid" );
 	}
 
+#ifdef ELITEFORCE
+	// SP cutscene auto-skip: when a cutscene is active and hasn't
+	// completed within a timeout, fast-forward to skip it.  This works
+	// around ICARUS scripts that stall (e.g., waiting for sound/animation
+	// completion signals that the bridge doesn't fully support yet).
+	if ( com_sv_running && com_sv_running->integer ) {
+		static int cameraActiveTime = 0;
+		int inCam = Cvar_VariableIntegerValue( "sp_in_camera" );
+		if ( inCam ) {
+			if ( cameraActiveTime == 0 ) {
+				cameraActiveTime = cls.realtime;
+			}
+			// After 5 seconds, force-skip the cutscene by telling
+			// the game DLL to disable the camera and unlock the player.
+			if ( cls.realtime - cameraActiveTime > 5000 ) {
+				Cvar_Set( "sp_skip_cutscene", "1" );
+			}
+		} else {
+			if ( cameraActiveTime > 0 ) {
+				// Cutscene ended - ensure normal speed
+				Cvar_Set( "timescale", "1" );
+				Cvar_Set( "skippingCinematic", "0" );
+				cameraActiveTime = 0;
+			}
+		}
+	}
+#endif
+
 	// allow pause in single player
 	if ( sv_paused->integer && CL_CheckPaused() && com_sv_running->integer ) {
 		// paused

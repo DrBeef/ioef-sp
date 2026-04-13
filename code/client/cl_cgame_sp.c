@@ -1001,42 +1001,34 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 		re.AddLightToScene( VMA(1), VMF(2), VMF(3), VMF(4), VMF(5) );
 		return 0;
 	case SPCG_R_RENDERSCENE: {
+		refdef_t *fd = (refdef_t *)VMA(1);
+		qboolean badViewport = ( fd->width <= 0 || fd->height <= 0 );
 		cl_sp_cgameScreenshotValid = qfalse;
-		// When sp_forcecamera is set, override the cutscene camera with
-		// the player's actual position and view angles so we can see
-		// the 3D world instead of the cutscene's dark space view.
-		if ( Cvar_VariableIntegerValue("sp_forcecamera") ) {
-			refdef_t *fd = (refdef_t *)VMA(1);
+		// Fix zero viewport from SP cutscene camera initialization.
+		// The cgame's CGCam_RenderScene can produce a 0x0 viewport when
+		// the camera hasn't been fully set up by ICARUS scripts yet.
+		// When this happens, fall back to the player's own viewpoint
+		// so the game is playable even during broken cutscenes.
+		if ( badViewport || Cvar_VariableIntegerValue("sp_forcecamera") ) {
 			void *rawPS = SV_SP_GetRawPlayerState();
-			static int fcDbg = 0;
-			fcDbg++;
 			if ( rawPS ) {
 				sp_playerState_t *ps = (sp_playerState_t *)rawPS;
-				if ( fcDbg <= 3 ) {
-					Com_Printf("FORCECAM: org=(%.0f,%.0f,%.0f) ang=(%.0f,%.0f,%.0f) rect=%dx%d+%d+%d fov=%.0fx%.0f rdflags=%d\n",
-						ps->origin[0], ps->origin[1], ps->origin[2],
-						ps->viewangles[0], ps->viewangles[1], ps->viewangles[2],
-						fd->width, fd->height, fd->x, fd->y,
-						fd->fov_x, fd->fov_y, fd->rdflags );
-				}
 				VectorCopy( ps->origin, fd->vieworg );
 				fd->vieworg[2] += ps->viewheight;
 				AnglesToAxis( ps->viewangles, fd->viewaxis );
 				Com_Memset( fd->areamask, 0x00, sizeof( fd->areamask ) );
-				// Fix zero viewport from cutscene camera init
-				if ( fd->width == 0 || fd->height == 0 ) {
-					fd->x = 0;
-					fd->y = 0;
-					fd->width = cls.glconfig.vidWidth;
-					fd->height = cls.glconfig.vidHeight;
-					fd->fov_x = 90;
-					fd->fov_y = 73.74f; // atan(tan(90/2) * 600/800) * 2
-				}
-			} else if ( fcDbg <= 3 ) {
-				Com_Printf("FORCECAM: rawPS is NULL!\n");
+			}
+			if ( badViewport ) {
+				fd->x = 0;
+				fd->y = 0;
+				fd->width = cls.glconfig.vidWidth;
+				fd->height = cls.glconfig.vidHeight;
+			}
+			if ( fd->fov_y <= 0 && fd->fov_x > 0 && fd->width > 0 ) {
+				fd->fov_y = fd->fov_x * (float)fd->height / (float)fd->width;
 			}
 		}
-		re.RenderScene( VMA(1) );
+		re.RenderScene( fd );
 		return 0;
 	}
 	case SPCG_R_SETCOLOR:
