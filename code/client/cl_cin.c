@@ -1407,6 +1407,18 @@ int CIN_PlayCinematic( const char *arg, int x, int y, int w, int h, int systemBi
 		Com_sprintf (name, sizeof(name), "%s", arg);
 	}
 
+#ifdef ELITEFORCE
+	/* Route .bik files to the Bink player */
+	{
+		extern qboolean CIN_Bink_IsBikFile( const char *filename );
+		extern int CIN_Bink_Open( const char *filename, int x, int y, int w, int h, int systemBits );
+		if ( CIN_Bink_IsBikFile( name ) || CIN_Bink_IsBikFile( arg ) ) {
+			int result = CIN_Bink_Open( name, x, y, w, h, systemBits );
+			return result >= 0 ? 0 : -1;
+		}
+	}
+#endif
+
 	if (!(systemBits & CIN_system)) {
 		for ( i = 0 ; i < MAX_VIDEO_HANDLES ; i++ ) {
 			if (!strcmp(cinTable[i].fileName, name) ) {
@@ -1628,6 +1640,18 @@ void CL_PlayCinematic_f(void) {
 
 
 void SCR_DrawCinematic (void) {
+#ifdef ELITEFORCE
+	{
+		extern qboolean CIN_Bink_IsPlaying( void );
+		extern void CIN_Bink_Draw( void );
+		extern e_status CIN_Bink_RunFrame( void );
+		if ( CIN_Bink_IsPlaying() ) {
+			CIN_Bink_RunFrame();
+			CIN_Bink_Draw();
+			return;
+		}
+	}
+#endif
 	if (CL_handle >= 0 && CL_handle < MAX_VIDEO_HANDLES) {
 		CIN_DrawCinematic(CL_handle);
 	}
@@ -1635,12 +1659,36 @@ void SCR_DrawCinematic (void) {
 
 void SCR_RunCinematic (void)
 {
+#ifdef ELITEFORCE
+	{
+		extern qboolean CIN_Bink_IsPlaying( void );
+		extern e_status CIN_Bink_RunFrame( void );
+		if ( CIN_Bink_IsPlaying() ) {
+			e_status status = CIN_Bink_RunFrame();
+			if ( status == FMV_EOF ) {
+				extern void CIN_Bink_Close( void );
+				CIN_Bink_Close();
+				clc.state = CA_DISCONNECTED;
+			}
+			return;
+		}
+	}
+#endif
 	if (CL_handle >= 0 && CL_handle < MAX_VIDEO_HANDLES) {
 		CIN_RunCinematic(CL_handle);
 	}
 }
 
 void SCR_StopCinematic(void) {
+#ifdef ELITEFORCE
+	{
+		extern qboolean CIN_Bink_IsPlaying( void );
+		extern void CIN_Bink_Close( void );
+		if ( CIN_Bink_IsPlaying() ) {
+			CIN_Bink_Close();
+		}
+	}
+#endif
 	if (CL_handle >= 0 && CL_handle < MAX_VIDEO_HANDLES) {
 		CIN_StopCinematic(CL_handle);
 		S_StopAllSounds ();
