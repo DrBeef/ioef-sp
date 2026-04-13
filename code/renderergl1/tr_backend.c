@@ -1312,13 +1312,35 @@ const void	*RB_SwapBuffers( const void *data ) {
 
 	GLimp_LogComment( "***************** RB_SwapBuffers *****************\n\n\n" );
 
+	/* SP Pixel Probe: sample a 3x3 grid of pixels from the back buffer
+	   and publish statistics to cvars for automated testing.  Runs every
+	   4th frame when sp_autotest is enabled to minimize perf impact. */
 	{
-		static int swapNum = 0;
-		swapNum++;
-		if ( swapNum <= 20 ) {
-			unsigned char px[4] = {0};
-			qglReadPixels( glConfig.vidWidth/2, glConfig.vidHeight/2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px );
-			ri.Printf( PRINT_ALL, "SWAP #%d: backbuf_center=(%d,%d,%d)\n", swapNum, px[0], px[1], px[2] );
+		static int probeFrame = 0;
+		static int prevBrightness = 0;
+		probeFrame++;
+		if ( ri.Cvar_VariableIntegerValue( "sp_autotest" ) && (probeFrame & 3) == 0 ) {
+			unsigned char px[9][4];
+			int w = glConfig.vidWidth, h = glConfig.vidHeight;
+			int positions[9][2] = {
+				{w/4, 3*h/4}, {w/2, 3*h/4}, {3*w/4, 3*h/4},  /* top row */
+				{w/4, h/2},   {w/2, h/2},   {3*w/4, h/2},      /* mid row */
+				{w/4, h/4},   {w/2, h/4},   {3*w/4, h/4}       /* bot row */
+			};
+			int brightness = 0, nonblack = 0, j;
+			for ( j = 0; j < 9; j++ ) {
+				qglReadPixels( positions[j][0], positions[j][1], 1, 1,
+					GL_RGBA, GL_UNSIGNED_BYTE, px[j] );
+				brightness += px[j][0] + px[j][1] + px[j][2];
+				if ( px[j][0] > 10 || px[j][1] > 10 || px[j][2] > 10 )
+					nonblack++;
+			}
+			int flicker = abs( brightness - prevBrightness );
+			prevBrightness = brightness;
+			ri.Cvar_Set( "sp_probe_brightness", va( "%d", brightness ) );
+			ri.Cvar_Set( "sp_probe_nonblack", va( "%d", nonblack ) );
+			ri.Cvar_Set( "sp_probe_flicker", va( "%d", flicker ) );
+			ri.Cvar_Set( "sp_probe_frame", va( "%d", probeFrame ) );
 		}
 	}
 

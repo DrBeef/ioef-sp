@@ -885,6 +885,163 @@ qboolean CL_GameCommand( void ) {
 
 
 
+#ifdef ELITEFORCE
+/*
+=====================
+CL_AutoTest_Frame
+
+Automated test sequence for SP game verification.
+Runs after rendering when sp_autotest=1, checks rendering,
+flickering, cutscene completion, and movement.
+=====================
+*/
+static void CL_AutoTest_Frame( void ) {
+	enum { AT_IDLE, AT_SETTLE, AT_RENDER, AT_FLICKER, AT_CUTSCENE,
+		   AT_INJECT, AT_MOVEMENT, AT_NPCS, AT_DONE };
+	static int state = AT_IDLE;
+	static int stateStart = 0;
+	static int flickerMax = 0;
+	static int flickerSamples = 0;
+	static float originBefore[3] = {0};
+
+	if ( !Cvar_VariableIntegerValue("sp_autotest") ) {
+		state = AT_IDLE;
+		return;
+	}
+
+	if ( clc.state != CA_ACTIVE ) {
+		if ( state == AT_IDLE ) {
+			state = AT_SETTLE;
+			stateStart = cls.realtime;
+			Com_Printf( "[AUTOTEST] Waiting for CA_ACTIVE...\n" );
+		}
+		if ( cls.realtime - stateStart > 60000 ) {
+			Com_Printf( "[AUTOTEST] MAP_LOAD: FAIL (timeout)\n" );
+			Com_Printf( "[AUTOTEST] === COMPLETE ===\n" );
+			Cvar_Set( "sp_autotest", "0" );
+			state = AT_IDLE;
+		}
+		return;
+	}
+
+	switch ( state ) {
+	case AT_IDLE:
+		state = AT_SETTLE;
+		stateStart = cls.realtime;
+		Com_Printf( "[AUTOTEST] MAP_LOAD: PASS (state=%d)\n", clc.state );
+		break;
+
+	case AT_SETTLE:
+		/* Wait 2 seconds for rendering to stabilize */
+		if ( cls.realtime - stateStart > 2000 ) {
+			state = AT_FLICKER;
+			stateStart = cls.realtime;
+			flickerMax = 0;
+			flickerSamples = 0;
+		}
+		break;
+
+	case AT_FLICKER: {
+		int flick = Cvar_VariableIntegerValue( "sp_probe_flicker" );
+		if ( flick > flickerMax ) flickerMax = flick;
+		flickerSamples++;
+		if ( flickerSamples >= 30 ) {
+			if ( flickerMax < 1000 ) {
+				Com_Printf( "[AUTOTEST] NO_FLICKER: PASS (max_delta=%d over %d samples)\n", flickerMax, flickerSamples );
+			} else {
+				Com_Printf( "[AUTOTEST] NO_FLICKER: FAIL (max_delta=%d over %d samples)\n", flickerMax, flickerSamples );
+			}
+			state = AT_CUTSCENE;
+			stateStart = cls.realtime;
+		}
+		break;
+	}
+
+	case AT_CUTSCENE: {
+		int inCam = Cvar_VariableIntegerValue( "sp_in_camera" );
+		if ( !inCam ) {
+			Com_Printf( "[AUTOTEST] CUTSCENE_DONE: PASS (completed in %dms)\n", cls.realtime - stateStart );
+			state = AT_INJECT;
+			stateStart = cls.realtime;
+			/* Record position before injecting movement */
+			{
+				const char *s = Cvar_VariableString( "sp_player_origin" );
+				sscanf( s, "%f %f %f", &originBefore[0], &originBefore[1], &originBefore[2] );
+			}
+			Cvar_Set( "sp_forcemove", "1" );
+		} else if ( cls.realtime - stateStart > 35000 ) {
+			Com_Printf( "[AUTOTEST] CUTSCENE_DONE: FAIL (still in camera after 35s)\n" );
+			state = AT_INJECT;
+			stateStart = cls.realtime;
+			{
+				const char *s = Cvar_VariableString( "sp_player_origin" );
+				sscanf( s, "%f %f %f", &originBefore[0], &originBefore[1], &originBefore[2] );
+			}
+			Cvar_Set( "sp_forcemove", "1" );
+		}
+		break;
+	}
+
+	case AT_INJECT:
+		/* Wait 1 second with forced movement */
+		if ( cls.realtime - stateStart > 1000 ) {
+			Cvar_Set( "sp_forcemove", "0" );
+			state = AT_MOVEMENT;
+		}
+		break;
+
+	case AT_MOVEMENT: {
+		float cur[3] = {0};
+		float dx, dy, dz, dist;
+		const char *s = Cvar_VariableString( "sp_player_origin" );
+		sscanf( s, "%f %f %f", &cur[0], &cur[1], &cur[2] );
+		dx = cur[0] - originBefore[0];
+		dy = cur[1] - originBefore[1];
+		dz = cur[2] - originBefore[2];
+		dist = (float)sqrt( dx*dx + dy*dy + dz*dz );
+		if ( dist > 10.0f ) {
+			Com_Printf( "[AUTOTEST] PLAYER_MOVES: PASS (dist=%.1f)\n", dist );
+		} else {
+			Com_Printf( "[AUTOTEST] PLAYER_MOVES: FAIL (dist=%.1f)\n", dist );
+		}
+		state = AT_NPCS;
+		break;
+	}
+
+	case AT_NPCS: {
+		int npcCount = Cvar_VariableIntegerValue( "sp_npc_count" );
+		if ( npcCount > 0 ) {
+			Com_Printf( "[AUTOTEST] NPC_PRESENT: PASS (count=%d)\n", npcCount );
+		} else {
+			Com_Printf( "[AUTOTEST] NPC_PRESENT: FAIL (count=0)\n" );
+		}
+		state = AT_RENDER;
+		break;
+	}
+
+	case AT_RENDER: {
+		/* Check scene visibility AFTER cutscene and movement, when
+		   the player is looking at actual 3D geometry, not dark space */
+		int bright = Cvar_VariableIntegerValue( "sp_probe_brightness" );
+		int nonblk = Cvar_VariableIntegerValue( "sp_probe_nonblack" );
+		if ( bright > 100 && nonblk >= 3 ) {
+			Com_Printf( "[AUTOTEST] SCENE_VISIBLE: PASS (brightness=%d, nonblack=%d)\n", bright, nonblk );
+		} else {
+			Com_Printf( "[AUTOTEST] SCENE_VISIBLE: FAIL (brightness=%d, nonblack=%d)\n", bright, nonblk );
+		}
+		state = AT_DONE;
+		break;
+	}
+
+	case AT_DONE:
+		Com_Printf( "[AUTOTEST] === ALL TESTS COMPLETE ===\n" );
+		Cvar_Set( "sp_autotest", "0" );
+		state = AT_IDLE;
+		break;
+	}
+}
+#endif
+
 /*
 =====================
 CL_CGameRendering
@@ -893,6 +1050,9 @@ CL_CGameRendering
 void CL_CGameRendering( stereoFrame_t stereo ) {
 	VM_Call( cgvm, CG_DRAW_ACTIVE_FRAME, cl.serverTime, stereo, clc.demoplaying );
 	VM_Debug( 0 );
+#ifdef ELITEFORCE
+	CL_AutoTest_Frame();
+#endif
 }
 
 

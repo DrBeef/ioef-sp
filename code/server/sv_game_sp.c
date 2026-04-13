@@ -2628,6 +2628,25 @@ intptr_t QDECL SV_SP_GameVmMain( int command, ... ) {
 		SV_SP_RestoreCgameSyscall();
 		// Sync again after the frame for snapshot building
 		SV_SP_SyncAllEntities();
+		// Publish player/NPC state for autotest verification
+		if ( Cvar_VariableIntegerValue("sp_autotest") ) {
+			sp_gentity_t *pEnt = (sp_gentity_t *)ge->gentities;
+			if ( pEnt->client ) {
+				sp_playerState_t *ps = (sp_playerState_t *)pEnt->client;
+				Cvar_Set( "sp_player_origin", va("%.1f %.1f %.1f",
+					ps->origin[0], ps->origin[1], ps->origin[2]) );
+			}
+			/* Count NPCs (eType=1 entities that aren't the player) */
+			{
+				int i, npcCount = 0;
+				for ( i = 1; i < ge->num_entities && i < MAX_GENTITIES; i++ ) {
+					sp_gentity_t *e = (sp_gentity_t *)((byte *)ge->gentities + i * ge->gentitySize);
+					if ( e->inuse && e->s.eType == 1 )
+						npcCount++;
+				}
+				Cvar_Set( "sp_npc_count", va("%d", npcCount) );
+			}
+		}
 		return 0;
 
 	case GAME_CONSOLE_COMMAND:
