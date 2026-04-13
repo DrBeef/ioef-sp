@@ -1002,14 +1002,22 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 		return 0;
 	case SPCG_R_RENDERSCENE: {
 		refdef_t *fd = (refdef_t *)VMA(1);
-		qboolean badViewport = ( fd->width <= 0 || fd->height <= 0 );
 		cl_sp_cgameScreenshotValid = qfalse;
-		// Fix zero viewport from SP cutscene camera initialization.
-		// The cgame's CGCam_RenderScene can produce a 0x0 viewport when
-		// the camera hasn't been fully set up by ICARUS scripts yet.
-		// When this happens, fall back to the player's own viewpoint
-		// so the game is playable even during broken cutscenes.
-		if ( badViewport || Cvar_VariableIntegerValue("sp_forcecamera") ) {
+		// Fix zero viewport from SP cutscene camera.  Keep the camera's
+		// vieworg/viewaxis intact so cutscenes render from the correct
+		// angle -- only fix the viewport size and FOV.
+		if ( fd->width <= 0 || fd->height <= 0 ) {
+			fd->x = 0;
+			fd->y = 0;
+			fd->width = cls.glconfig.vidWidth;
+			fd->height = cls.glconfig.vidHeight;
+			Com_Memset( fd->areamask, 0x00, sizeof( fd->areamask ) );
+		}
+		if ( fd->fov_y <= 0 && fd->fov_x > 0 && fd->width > 0 ) {
+			fd->fov_y = fd->fov_x * (float)fd->height / (float)fd->width;
+		}
+		// sp_forcecamera: debug cvar to override cutscene with player view
+		if ( Cvar_VariableIntegerValue("sp_forcecamera") ) {
 			void *rawPS = SV_SP_GetRawPlayerState();
 			if ( rawPS ) {
 				sp_playerState_t *ps = (sp_playerState_t *)rawPS;
@@ -1017,15 +1025,6 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 				fd->vieworg[2] += ps->viewheight;
 				AnglesToAxis( ps->viewangles, fd->viewaxis );
 				Com_Memset( fd->areamask, 0x00, sizeof( fd->areamask ) );
-			}
-			if ( badViewport ) {
-				fd->x = 0;
-				fd->y = 0;
-				fd->width = cls.glconfig.vidWidth;
-				fd->height = cls.glconfig.vidHeight;
-			}
-			if ( fd->fov_y <= 0 && fd->fov_x > 0 && fd->width > 0 ) {
-				fd->fov_y = fd->fov_x * (float)fd->height / (float)fd->width;
 			}
 		}
 		re.RenderScene( fd );
