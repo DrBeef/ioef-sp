@@ -3068,15 +3068,8 @@ void CL_Frame ( int msec ) {
 		S_StopAllSounds();
 		VM_Call( uivm, UI_SET_ACTIVE_MENU, UIMENU_MAIN );
 #ifdef ELITEFORCE
-		// SP mode: the SP UI's UI_IS_FULLSCREEN may return false even
-		// when the menu is active, causing this block to run every frame
-		// and spam SetActiveMenu.  Force KEYCATCH_UI to stay set so this
-		// only runs once, and close the console so the menu is visible.
-		{
-			extern void Con_Close( void );
-			Key_SetCatcher( KEYCATCH_UI );
-			Con_Close();
-		}
+		// SP mode: force KEYCATCH_UI so this block only runs once.
+		Key_SetCatcher( KEYCATCH_UI );
 #endif
 	}
 

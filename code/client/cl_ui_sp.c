@@ -1224,19 +1224,10 @@ intptr_t QDECL CL_SP_UIVmMain( int command, ... ) {
 		ue->UI_Refresh( arg0 );
 		return 0;
 
-	case UI_IS_FULLSCREEN: {
-		char *menuname = NULL;
-		qboolean fullscreen = qfalse;
-		ue->UI_GetActiveMenu( &menuname, &fullscreen );
-		/* If the SP UI's GetActiveMenu doesn't report fullscreen
-		   correctly, check if KEYCATCH_UI is set as a fallback.
-		   This prevents the engine from spamming SetActiveMenu
-		   every frame. */
-		if ( !fullscreen && ( Key_GetCatcher() & KEYCATCH_UI ) ) {
-			fullscreen = qtrue;
-		}
-		return fullscreen;
-	}
+	case UI_IS_FULLSCREEN:
+		/* The SP UI's GetActiveMenu can crash if called at the wrong
+		   time.  Use KEYCATCH_UI as the primary indicator instead. */
+		return ( Key_GetCatcher() & KEYCATCH_UI ) ? qtrue : qfalse;
 
 	case UI_SET_ACTIVE_MENU: {
 		// The ioEF engine passes a uiMenuCommand_t enum value.
