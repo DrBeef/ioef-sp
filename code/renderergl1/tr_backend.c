@@ -1352,6 +1352,20 @@ const void	*RB_SwapBuffers( const void *data ) {
 			ri.Cvar_Set( "sp_probe_nonblack", va( "%d", nonblack ) );
 			ri.Cvar_Set( "sp_probe_flicker", va( "%d", flicker ) );
 			ri.Cvar_Set( "sp_probe_frame", va( "%d", probeFrame ) );
+
+			/* Stuck-frame detector: track how many consecutive frames
+			   have the same brightness during a cutscene */
+			{
+				static int stuckCount = 0;
+				static int lastBright = -1;
+				if ( flicker < 5 && lastBright == brightness ) {
+					stuckCount++;
+				} else {
+					stuckCount = 0;
+				}
+				lastBright = brightness;
+				ri.Cvar_Set( "sp_probe_stuck", va( "%d", stuckCount ) );
+			}
 		}
 	}
 

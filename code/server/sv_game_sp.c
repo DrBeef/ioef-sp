@@ -443,6 +443,38 @@ qboolean SV_SP_IsActive( void );
 
 /*
 ===============
+SV_SP_TranslateSvFlags
+
+The SP DLL's svFlags bit layout is not the same as ioEF's ELITEFORCE layout.
+In particular:
+
+  SP  0x00000004 = SVF_NPC
+  ioEF 0x00000004 = SVF_CLIENTMASK
+
+Blindly copying sp_ent->svFlags into sharedEntity_t::r.svFlags causes NPCs to
+be treated as client-masked entities. Because the bridge never fills
+r.singleClient with a valid bitmask, the snapshot builder drops them for the
+local player and they never appear in cgame snapshots.
+
+Only translate the flag bits that have matching semantics on both sides.
+SP-only flags (SVF_INACTIVE, SVF_NPC, SVF_PLAYER_USABLE) must not leak into the
+engine's sharedEntity_t view.
+===============
+*/
+static int SV_SP_TranslateSvFlags( int spFlags ) {
+	int sharedFlags = 0;
+
+	if ( spFlags & 0x00000001 ) sharedFlags |= SVF_NOCLIENT;
+	if ( spFlags & 0x00000008 ) sharedFlags |= SVF_BOT;
+	if ( spFlags & 0x00000020 ) sharedFlags |= SVF_BROADCAST;
+	if ( spFlags & 0x00000040 ) sharedFlags |= SVF_PORTAL;
+	if ( spFlags & 0x00000080 ) sharedFlags |= SVF_USE_CURRENT_ORIGIN;
+
+	return sharedFlags;
+}
+
+/*
+===============
 SV_SP_SyncToShared
 
 Copies entity state from the SP game module's sp_gentity_t into the
@@ -517,7 +549,7 @@ static void SV_SP_SyncToShared( sp_gentity_t *sp_ent ) {
 	// These fields control collision, PVS visibility, and area portal state.
 	se->r.linked       = sp_ent->linked;
 	se->r.linkcount    = 0;
-	se->r.svFlags      = sp_ent->svFlags;
+	se->r.svFlags      = SV_SP_TranslateSvFlags( sp_ent->svFlags );
 	se->r.singleClient = 0;
 	se->r.bmodel       = sp_ent->bmodel;
 	VectorCopy( sp_ent->mins, se->r.mins );
@@ -1983,11 +2015,13 @@ static void SV_SP_SetBrushModel( sp_gentity_t *ent, const char *name ) {
 static void SV_SP_Trace( trace_t *results, const vec3_t start, const vec3_t mins,
 						 const vec3_t maxs, const vec3_t end, int passEntityNum,
 						 int contentmask ) {
+	SV_SP_EnsureEntityData();
 	SV_Trace( results, start, (float *)mins, (float *)maxs, end, passEntityNum,
 			  contentmask, /*capsule*/ qfalse );
 }
 
 static int SV_SP_PointContents( const vec3_t point, int passEntityNum ) {
+	SV_SP_EnsureEntityData();
 	return SV_PointContents( point, passEntityNum );
 }
 
@@ -2672,15 +2706,16 @@ intptr_t QDECL SV_SP_GameVmMain( int command, ... ) {
 		SV_SP_RestoreCgameSyscall();
 		// Sync again after the frame for snapshot building
 		SV_SP_SyncAllEntities();
-		// Publish player/NPC state for autotest verification
-		if ( Cvar_VariableIntegerValue("sp_autotest") ) {
+		// Publish player/NPC/camera state for autotest and diagnostics
+		if ( Cvar_VariableIntegerValue("sp_autotest") ||
+				Cvar_VariableIntegerValue("sp_in_camera") ) {
 			sp_gentity_t *pEnt = (sp_gentity_t *)ge->gentities;
 			if ( pEnt->client ) {
 				sp_playerState_t *ps = (sp_playerState_t *)pEnt->client;
 				Cvar_Set( "sp_player_origin", va("%.1f %.1f %.1f",
 					ps->origin[0], ps->origin[1], ps->origin[2]) );
 			}
-			/* Count NPCs (eType=1 entities that aren't the player) */
+			/* Count NPCs */
 			{
 				int i, npcCount = 0;
 				for ( i = 1; i < ge->num_entities && i < MAX_GENTITIES; i++ ) {
@@ -2690,6 +2725,12 @@ intptr_t QDECL SV_SP_GameVmMain( int command, ... ) {
 				}
 				Cvar_Set( "sp_npc_count", va("%d", npcCount) );
 			}
+			/* Camera state: read client_camera global from the shared DLL.
+			   The DLL exports client_camera as a global symbol. */
+			/* Camera diagnostics: the client_camera global isn't exported
+			   by the DLL so we can't look it up by name. Instead, read
+			   the camera origin from the refdef that gets passed to
+			   SPCG_R_RENDERSCENE (already logged there as RENDER_DBG). */
 		}
 		return 0;
 

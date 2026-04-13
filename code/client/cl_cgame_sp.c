@@ -74,6 +74,9 @@ module's live data.
 #include "snd_local.h"
 #include "../qcommon/sp_types.h"
 
+// Entity count per render frame (reset at RenderScene, incremented at AddRefEntity)
+static int cl_sp_frameEntCount = 0;
+
 // Q_irand: random integer in [min, max] inclusive
 static int Q_irand( int min, int max ) {
 	if ( min >= max ) return min;
@@ -621,103 +624,106 @@ static void CL_SP_AmbientEnsureParsed( void ) {
  *   65-70  : ambient sound system (SP-only, appended at end)
  */
 
-/* Core engine services -- identical numbering to ioEF MP for 0-16 */
+/*
+ * SP cgame syscall numbers -- VERIFIED against the decompiled efgamex86.dll
+ * (E:\ef_decomp\decompiled\efgamex86_named.c).  The DLL calls
+ * dword_200C87A8(N) for trap N.
+ *
+ * CRITICAL: These numbers must match the COMPILED DLL, not the
+ * Elite-Reinforce source headers.  The source has Force Feedback entries
+ * (34-37) that the compiled DLL does NOT use -- the DLL puts renderer
+ * calls at those indices instead.
+ */
+
+/* Core engine services (0-7) */
 #define SPCG_PRINT                        0
 #define SPCG_ERROR                        1
 #define SPCG_MILLISECONDS                 2
 #define SPCG_CVAR_REGISTER                3
 #define SPCG_CVAR_UPDATE                  4
 #define SPCG_CVAR_SET                     5
-#define SPCG_ARGC                         6
-#define SPCG_ARGV                         7
-#define SPCG_ARGS                         8
+#define SPCG_CVAR_VARIABLESTRINGBUFFER    6
+#define SPCG_ARGC                         7
+/* 8 = unused (Argv is via gi.* direct pointer) */
+
+/* Filesystem (9-12) */
 #define SPCG_FS_FOPENFILE                 9
 #define SPCG_FS_READ                      10
-#define SPCG_FS_WRITE                     11
+/* 11 = unused (FS_Write) */
 #define SPCG_FS_FCLOSEFILE                12
+
+/* Commands (13-14, 16-17) */
 #define SPCG_SENDCONSOLECOMMAND           13
 #define SPCG_ADDCOMMAND                   14
-#define SPCG_SENDCLIENTCOMMAND            15
+/* 15 = unused */
 #define SPCG_UPDATESCREEN                 16
+#define SPCG_SENDCLIENTCOMMAND            17
 
-/* Collision model -- still matching ioEF MP numbering at this point */
-#define SPCG_CM_LOADMAP                   17
-#define SPCG_CM_NUMINLINEMODELS           18
-#define SPCG_CM_INLINEMODEL               19
-#define SPCG_CM_TEMPBOXMODEL              20
-#define SPCG_CM_POINTCONTENTS             21
-#define SPCG_CM_TRANSFORMEDPOINTCONTENTS  22
+/* Collision model (18-26) -- note: different order from old table! */
+#define SPCG_CM_LOADMAP                   18  /* was 17 */
+#define SPCG_CM_NUMINLINEMODELS           19
+#define SPCG_CM_INLINEMODEL               20
+#define SPCG_CM_LOADINLINEMODEL           21  /* NEW: not in old table */
+#define SPCG_CM_TEMPBOXMODEL              22
 #define SPCG_CM_BOXTRACE                  23
 #define SPCG_CM_TRANSFORMEDBOXTRACE       24
 #define SPCG_CM_MARKFRAGMENTS             25
+#define SPCG_CM_POINTCONTENTS             26
 
-/* Sound -- still matching ioEF MP numbering through 33 */
-#define SPCG_S_STARTSOUND                 26
-#define SPCG_S_STARTLOCALSOUND            27
-#define SPCG_S_CLEARLOOPINGSOUNDS         28
-#define SPCG_S_ADDLOOPINGSOUND            29
-#define SPCG_S_UPDATEENTITYPOSITION       30
-#define SPCG_S_RESPATIALIZE               31
+/* Sound (27-33) -- REORDERED from old table */
+#define SPCG_S_MUTESOUND                  27  /* NEW: was missing */
+#define SPCG_S_STARTLOCALSOUND            28  /* was 27 */
+#define SPCG_S_STARTSOUND                 29  /* was 26 */
+#define SPCG_S_CLEARLOOPINGSOUNDS         30  /* was 28 */
+#define SPCG_S_ADDLOOPINGSOUND            31  /* was 29 */
 #define SPCG_S_REGISTERSOUND              32
 #define SPCG_S_STARTBACKGROUNDTRACK       33
 
-/* Force Feedback -- SP-ONLY.  These four calls are where SP and MP syscall
-   numbering permanently diverge.  The original Ritual engine supported
-   DirectInput Force Feedback devices (rumble joysticks, force-feedback
-   steering wheels).  The cgame would trigger haptic effects for weapon
-   fire, explosions, and environmental hazards.  ioEF has no FF support,
-   so these are stubbed out, but their presence shifts every subsequent
-   syscall number up by 4 relative to ioEF MP. */
-#define SPCG_FF_STARTFX                   34
-#define SPCG_FF_ENSUREFX                  35
-#define SPCG_FF_STOPFX                    36
-#define SPCG_FF_STOPALLFX                 37
-
-/* Renderer -- numbers 38+ are offset from ioEF MP due to the FF block above.
-   Additionally, SP inserts its own renderer calls (GetLighting, DrawScreenShot,
-   DrawRotatePic, Scissor) that push numbers further apart. */
-#define SPCG_R_LOADWORLDMAP               38
-#define SPCG_R_REGISTERMODEL              39
-#define SPCG_R_REGISTERSKIN               40
+/* Renderer (34-51) -- COMPLETELY DIFFERENT from old table */
+#define SPCG_R_LOADWORLDMAP               34  /* was 38 */
+#define SPCG_R_REGISTERMODEL              35  /* was 39 */
+/* 36 = unused */
+#define SPCG_R_REGISTERFONT               37  /* NEW: R_RegisterFont */
+#define SPCG_R_REGISTERSKIN               38  /* was 40 */
+#define SPCG_R_REGISTERMODEL2             39  /* NEW: R_RegisterModel2 */
+#define SPCG_R_REGISTERSKIN2              40  /* NEW: R_RegisterSkin2 */
 #define SPCG_R_REGISTERSHADER             41
 #define SPCG_R_REGISTERSHADERNOMIP        42
 #define SPCG_R_CLEARSCENE                 43
 #define SPCG_R_ADDREFENTITYTOSCENE        44
-#define SPCG_R_GETLIGHTING                45  /* SP-only: query lighting at a world point */
-#define SPCG_R_ADDPOLYTOSCENE             46
-#define SPCG_R_ADDLIGHTTOSCENE            47
-#define SPCG_R_RENDERSCENE                48
-#define SPCG_R_SETCOLOR                   49
-#define SPCG_R_DRAWSTRETCHPIC             50
-#define SPCG_R_DRAWSCREENSHOT             51  /* SP-only: draw a captured screenshot as texture */
-#define SPCG_R_MODELBOUNDS                52
-#define SPCG_R_LERPTAG                    53
-#define SPCG_R_DRAWROTATEPIC              54  /* SP-only: draw a 2D pic with rotation */
-#define SPCG_R_SCISSOR                    55  /* SP-only: set a scissor rectangle for 2D rendering */
+#define SPCG_R_ADDPOLYTOSCENE             45  /* was 46 */
+#define SPCG_R_ADDLIGHTTOSCENE            46  /* was 47 */
+#define SPCG_R_RENDERSCENE                47  /* was 48 */
+#define SPCG_R_SETCOLOR                   48  /* was 49 */
+#define SPCG_R_DRAWSTRETCHPIC             49  /* was 50 */
+#define SPCG_R_MODELBOUNDS                50  /* was 52 */
+#define SPCG_R_LERPTAG                    51  /* was 53 */
 
-/* Client state queries */
-#define SPCG_GETGLCONFIG                  56
-#define SPCG_GETGAMESTATE                 57
-#define SPCG_GETCURRENTSNAPSHOTNUMBER     58
-#define SPCG_GETSNAPSHOT                  59
-#define SPCG_GETSERVERCOMMAND             60
-#define SPCG_GETCURRENTCMDNUMBER          61
-#define SPCG_GETUSERCMD                   62
-#define SPCG_SETUSERCMDVALUE              63
-#define SPCG_MEMORY_REMAINING             64
+/* Client state queries (52-59) -- shifted from old 56-63 */
+#define SPCG_GETGLCONFIG                  52  /* was 56 */
+#define SPCG_GETGAMESTATE                 53  /* was 57 */
+#define SPCG_GETCURRENTSNAPSHOTNUMBER     54  /* was 58 */
+#define SPCG_GETSNAPSHOT                  55  /* was 59 */
+#define SPCG_GETSERVERCOMMAND             56  /* was 60 */
+#define SPCG_GETCURRENTCMDNUMBER          57  /* was 61 */
+#define SPCG_GETUSERCMD                   58  /* was 62 */
+#define SPCG_SETUSERCMDVALUE              59  /* was 63 */
 
-/* Ambient Sound System -- SP-ONLY.  The original Ritual engine had a
-   sophisticated positional ambient sound system that could attach sound
-   environments to BSP brush models and world regions.  ioEF now bridges
-   the basic data flow by parsing `sound/sound.txt`, precaching set names,
-   driving looping sounds, and selecting one-shot subwaves, but parity with
-   the original blending/mixing behavior is still incomplete. */
-#define SPCG_S_UPDATEAMBIENTSET           65  /* update the active ambient sound set */
-#define SPCG_S_ADDLOCALSET                66  /* add a local ambient sound set at a position */
-#define SPCG_AS_PARSESETS                 67  /* parse ambient set definitions from a file */
-#define SPCG_AS_ADDENTRY                  68  /* add an entry to an ambient set */
-#define SPCG_AS_GETBMODELSOUND            69  /* get the ambient sound for a brush model */
-#define SPCG_S_GETSAMPLELENGTH            70  /* query the duration of a sound sample */
+/* SP-only renderer extensions (60-63) */
+#define SPCG_R_DRAWROTATEPIC              60  /* was 54 */
+#define SPCG_R_DRAWROTATEPIC2             61  /* NEW */
+#define SPCG_R_LAGOGGLES                  62  /* NEW */
+#define SPCG_R_SCISSOR                    63  /* was 55 */
+
+/* Script/parser system (65-69) -- NEW, were ambient sound */
+#define SPCG_PC_LOADSOURCE                65  /* was S_UPDATEAMBIENTSET */
+#define SPCG_PC_FREESOURCE                66  /* was S_ADDLOCALSET */
+#define SPCG_FX_REGISTEREFFECT            67  /* was AS_PARSESETS */
+#define SPCG_FX_PLAYSIMPLEEFFECT          68  /* was AS_ADDENTRY */
+#define SPCG_PC_READTOKEN                 69  /* was AS_GETBMODELSOUND */
+
+/* Misc (70) */
+#define SPCG_R_REALTIME                   70  /* was S_GETSAMPLELENGTH */
 
 /*
  * VM argument access macros.  We #undef first because these are also defined
@@ -838,10 +844,10 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 	// --- command args ---
 	case SPCG_ARGC:
 		return Cmd_Argc();
-	case SPCG_ARGV:
+	case 8: /* SPCG_ARGV */
 		Cmd_ArgvBuffer( args[1], VMA(2), args[3] );
 		return 0;
-	case SPCG_ARGS:
+	case 11: /* SPCG_ARGS */
 		Cmd_ArgsBuffer( VMA(1), args[2] );
 		return 0;
 
@@ -851,7 +857,7 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 	case SPCG_FS_READ:
 		FS_Read2( VMA(1), args[2], args[3] );
 		return 0;
-	case SPCG_FS_WRITE:
+	case 15: /* SPCG_FS_WRITE */
 		FS_Write( VMA(1), args[2], args[3] );
 		return 0;
 	case SPCG_FS_FCLOSEFILE:
@@ -895,7 +901,7 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 		return CM_TempBoxModel( VMA(1), VMA(2), /*capsule*/ qfalse );
 	case SPCG_CM_POINTCONTENTS:
 		return CM_PointContents( VMA(1), args[2] );
-	case SPCG_CM_TRANSFORMEDPOINTCONTENTS:
+	case 900: /* SPCG_CM_TRANSFORMEDPOINTCONTENTS */
 		return CM_TransformedPointContents( VMA(1), args[2], VMA(3), VMA(4) );
 	case SPCG_CM_BOXTRACE:
 		CM_BoxTrace( VMA(1), VMA(2), VMA(3), VMA(4), VMA(5), args[6], args[7], /*capsule*/ qfalse );
@@ -921,10 +927,10 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 		SP_TRACE("S_AddLoopingSound", NULL, 0);
 		S_AddLoopingSound( args[1], VMA(2), VMA(3), args[4] );
 		return 0;
-	case SPCG_S_UPDATEENTITYPOSITION:
+	case 901: /* SPCG_S_UPDATEENTITYPOSITION */
 		S_UpdateEntityPosition( args[1], VMA(2) );
 		return 0;
-	case SPCG_S_RESPATIALIZE:
+	case 902: /* SPCG_S_RESPATIALIZE */
 		S_Respatialize( args[1], VMA(2), VMA(3), args[4] );
 		return 0;
 	case SPCG_S_REGISTERSOUND: {
@@ -950,17 +956,39 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 	// ioEF has no force-feedback hardware support, so these are safe no-ops.
 	// The SP cgame handles the absence gracefully -- it simply gets no haptic
 	// response, which doesn't affect gameplay or visuals.
-	case SPCG_FF_STARTFX:
-		SP_TRACE("FF_StartFX", NULL, 0);
+	/* NEW syscalls verified against the decompiled efgamex86.dll */
+	case SPCG_S_MUTESOUND:
 		return 0;
-	case SPCG_FF_ENSUREFX:
-		SP_TRACE("FF_EnsureFX", NULL, 0);
+	case SPCG_CM_LOADINLINEMODEL:
+		return CM_InlineModel( args[1] );
+	case SPCG_R_REGISTERFONT:
+		re.RegisterFont( VMA(1), args[2], VMA(3) );
 		return 0;
-	case SPCG_FF_STOPFX:
-		SP_TRACE("FF_StopFX", NULL, 0);
+	case SPCG_R_REGISTERMODEL2:
+		return re.RegisterModel( VMA(1) );
+	case SPCG_R_REGISTERSKIN2:
+		return re.RegisterSkin( VMA(1) );
+	case SPCG_R_DRAWROTATEPIC2:
+		if ( re.DrawRotatePic ) {
+			re.DrawRotatePic( VMF(1), VMF(2), VMF(3), VMF(4), VMF(5), VMF(6), VMF(7), VMF(8), VMF(9), args[10] );
+		}
 		return 0;
-	case SPCG_FF_STOPALLFX:
-		SP_TRACE("FF_StopAllFX", NULL, 0);
+	case SPCG_R_LAGOGGLES:
+		return 0;  /* stub - LA Goggles visual effect */
+	case SPCG_PC_LOADSOURCE:
+		return 0;  /* stub - script parser */
+	case SPCG_PC_FREESOURCE:
+		return 0;
+	case SPCG_FX_REGISTEREFFECT:
+		return 0;  /* stub - FX system */
+	case SPCG_FX_PLAYSIMPLEEFFECT:
+		return 0;
+	case SPCG_PC_READTOKEN:
+		return 0;
+	case SPCG_R_REALTIME:
+		return Sys_Milliseconds();
+	case SPCG_CVAR_VARIABLESTRINGBUFFER:
+		Cvar_VariableStringBuffer( VMA(1), VMA(2), args[3] );
 		return 0;
 
 	// --- renderer ---
@@ -979,9 +1007,11 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 		re.ClearScene();
 		return 0;
 	case SPCG_R_ADDREFENTITYTOSCENE:
+		/* Count entities added per RenderScene cycle */
+		cl_sp_frameEntCount++;
 		re.AddRefEntityToScene( VMA(1) );
 		return 0;
-	case SPCG_R_GETLIGHTING: {
+	case 903: /* SPCG_R_GETLIGHTING */ {
 		/*
 		 * The SP cgame reads the output vectors unconditionally and uses the
 		 * directed light intensity for gameplay (stealth visibility). Provide
@@ -1003,6 +1033,18 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 	case SPCG_R_RENDERSCENE: {
 		refdef_t *fd = (refdef_t *)VMA(1);
 		cl_sp_cgameScreenshotValid = qfalse;
+		/* Publish entity count from this render cycle */
+		{
+			static int logCount = 0;
+			logCount++;
+			if ( logCount <= 5 || (logCount % 300) == 0 ) {
+				Com_Printf( "[RENDER_DBG] #%d ents=%d viewport=%dx%d org=(%.0f,%.0f,%.0f)\n",
+					logCount, cl_sp_frameEntCount, fd->width, fd->height,
+					fd->vieworg[0], fd->vieworg[1], fd->vieworg[2] );
+			}
+			Cvar_Set( "sp_ent_added", va("%d", cl_sp_frameEntCount) );
+			cl_sp_frameEntCount = 0;
+		}
 		// Fix zero viewport from SP cutscene camera.  Keep the camera's
 		// vieworg/viewaxis intact so cutscenes render from the correct
 		// angle -- only fix the viewport size and FOV.
@@ -1015,6 +1057,16 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 		}
 		if ( fd->fov_y <= 0 && fd->fov_x > 0 && fd->width > 0 ) {
 			fd->fov_y = fd->fov_x * (float)fd->height / (float)fd->width;
+		}
+		// Log cutscene camera position for debugging
+		{
+			static int camLog = 0;
+			camLog++;
+			if ( camLog <= 5 || camLog == 100 || camLog == 500 ) {
+				Com_Printf( "[CAM_DBG] #%d org=(%.0f,%.0f,%.0f) fov=%.0fx%.0f rect=%dx%d\n",
+					camLog, fd->vieworg[0], fd->vieworg[1], fd->vieworg[2],
+					fd->fov_x, fd->fov_y, fd->width, fd->height );
+			}
 		}
 		// sp_forcecamera: debug cvar to override cutscene with player view
 		if ( Cvar_VariableIntegerValue("sp_forcecamera") ) {
@@ -1036,7 +1088,7 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 	case SPCG_R_DRAWSTRETCHPIC:
 		re.DrawStretchPic( VMF(1), VMF(2), VMF(3), VMF(4), VMF(5), VMF(6), VMF(7), VMF(8), args[9] );
 		return 0;
-	case SPCG_R_DRAWSCREENSHOT: {
+	case 904: /* SPCG_R_DRAWSCREENSHOT */ {
 		// SP-only renderer call: R_DrawScreenShot.
 		int captured = cl_sp_cgameScreenshotValid;
 		char shotBuf[SPTRACE_STR_MAX];
@@ -1215,6 +1267,14 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 		   field values in tempSnap.entities[] are ignored -- only .number
 		   matters.  The real data comes from SV_SP_GetRawEntityState(). */
 		spSnap->numEntities = tempSnap.numEntities;
+		{
+			static int snapLog = 0;
+			snapLog++;
+			if ( snapLog <= 5 || (snapLog % 300) == 0 ) {
+				Com_Printf( "[SNAP_DBG] #%d numEntities=%d serverTime=%d\n",
+					snapLog, tempSnap.numEntities, tempSnap.serverTime );
+			}
+		}
 		for ( i = 0; i < tempSnap.numEntities && i < SP_MAX_ENTITIES_IN_SNAPSHOT; i++ ) {
 			int entNum = tempSnap.entities[i].number;
 			sp_entityState_t *rawEnt = SV_SP_GetRawEntityState( entNum );
@@ -1242,11 +1302,11 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 	case SPCG_SETUSERCMDVALUE:
 		CL_SetUserCmdValue( args[1], VMF(2) );
 		return 0;
-	case SPCG_MEMORY_REMAINING:
+	case 905: /* SPCG_MEMORY_REMAINING */
 		return Hunk_MemoryRemaining();
 
 	// --- EF1 SP ambient sound bridge ---
-	case SPCG_S_UPDATEAMBIENTSET: {	/* refresh which ambient set is active for the player's position */
+	case 906: /* SPCG_S_UPDATEAMBIENTSET */ {	/* refresh which ambient set is active for the player's position */
 		cl_sp_ambientSet_t *set;
 		const char *ambientName;
 		int setIndex;
@@ -1294,7 +1354,7 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 		SP_TRACE("S_UpdateAmbientSet", infoBuf, setIndex);
 		return 0;
 	}
-	case SPCG_S_ADDLOCALSET: {		/* register a local ambient set at a specific world position */
+	case 907: /* SPCG_S_ADDLOCALSET */ {		/* register a local ambient set at a specific world position */
 		cl_sp_ambientSet_t *set;
 		const char *ambientName;
 		float radiusSquared;
@@ -1363,14 +1423,14 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 		SP_TRACE("S_AddLocalSet", infoBuf, nextWaveTime);
 		return nextWaveTime;
 	}
-	case SPCG_AS_PARSESETS: {		/* parse ambient set definitions from sound/sound.txt */
+	case 908: /* SPCG_AS_PARSESETS */ {		/* parse ambient set definitions from sound/sound.txt */
 		char infoBuf[SPTRACE_STR_MAX];
 		CL_SP_ParseAmbientSetFile();
 		Com_sprintf( infoBuf, sizeof( infoBuf ), "sets=%d", cl_sp_numAmbientSets );
 		SP_TRACE("AS_ParseSets", infoBuf, cl_sp_numAmbientSets);
 		return 0;
 	}
-	case SPCG_AS_ADDENTRY: {		/* add a map-local precache hint for an ambient set */
+	case 909: /* SPCG_AS_ADDENTRY */ {		/* add a map-local precache hint for an ambient set */
 		const char *ambientName;
 		char infoBuf[SPTRACE_STR_MAX];
 		ambientName = VMA(1) ? (const char *)VMA(1) : "(null)";
@@ -1380,7 +1440,7 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 		SP_TRACE("AS_AddEntry", infoBuf, cl_sp_numAmbientPrecache);
 		return 0;
 	}
-	case SPCG_AS_GETBMODELSOUND: {	/* query which ambient sound a brush model should emit */
+	case 910: /* SPCG_AS_GETBMODELSOUND */ {	/* query which ambient sound a brush model should emit */
 		cl_sp_ambientSet_t *set;
 		sfxHandle_t handle;
 		char bmodelBuf[SPTRACE_STR_MAX];
@@ -1408,7 +1468,7 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 		SP_TRACE("AS_GetBModelSound", bmodelBuf, handle ? handle : -1);
 		return handle ? handle : -1;
 	}
-	case SPCG_S_GETSAMPLELENGTH: {	/* query duration of a sound sample in milliseconds */
+	case 911: /* SPCG_S_GETSAMPLELENGTH */ {	/* query duration of a sound sample in milliseconds */
 		int len = CL_SP_GetSampleLengthMilliseconds( args[1] );
 		char infoBuf[32];
 		Com_sprintf( infoBuf, sizeof( infoBuf ), "sfx=%d", (int)args[1] );
