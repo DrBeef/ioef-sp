@@ -652,23 +652,24 @@ static void CL_SP_AmbientEnsureParsed( void ) {
 /* 11 = unused (FS_Write) */
 #define SPCG_FS_FCLOSEFILE                12
 
-/* Commands (13-14, 16-17) */
+/* Commands (13-14, 16-18) */
 #define SPCG_SENDCONSOLECOMMAND           13
 #define SPCG_ADDCOMMAND                   14
 /* 15 = unused */
 #define SPCG_UPDATESCREEN                 16
 #define SPCG_SENDCLIENTCOMMAND            17
+/* 18 = trap_UpdateScreen (alternate call site - same as 16) */
 
-/* Collision model (18-26) -- note: different order from old table! */
-#define SPCG_CM_LOADMAP                   18  /* was 17 */
-#define SPCG_CM_NUMINLINEMODELS           19
-#define SPCG_CM_INLINEMODEL               20
-#define SPCG_CM_LOADINLINEMODEL           21  /* NEW: not in old table */
-#define SPCG_CM_TEMPBOXMODEL              22
-#define SPCG_CM_BOXTRACE                  23
-#define SPCG_CM_TRANSFORMEDBOXTRACE       24
-#define SPCG_CM_MARKFRAGMENTS             25
+/* Collision model (19-26) -- verified against decompile */
+#define SPCG_CM_LOADMAP                   19
+#define SPCG_CM_NUMINLINEMODELS           20
+#define SPCG_CM_INLINEMODEL               21
+#define SPCG_CM_LOADINLINEMODEL           22
+#define SPCG_CM_TEMPBOXMODEL              23
+#define SPCG_CM_BOXTRACE                  24
+#define SPCG_CM_TRANSFORMEDBOXTRACE       25
 #define SPCG_CM_POINTCONTENTS             26
+/* Note: CM_MarkFragments is NOT a cgame syscall - it uses gi.* direct import */
 
 /* Sound (27-33) -- REORDERED from old table */
 #define SPCG_S_MUTESOUND                  27  /* NEW: was missing */
@@ -813,6 +814,15 @@ extern void DebugServer_TraceSPCall(int id, const char *name, qboolean isImport,
 #define SP_TRACE_NORET(name, str) SP_TRACE(name, str, 0)
 
 intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
+	/* Log unknown/high trap numbers to detect syscall table mismatches */
+	{
+		static int trapLog = 0;
+		trapLog++;
+		if ( trapLog <= 200 ) {
+			Com_Printf( "[TRAP] #%d trap=%d\n", trapLog, (int)args[0] );
+		}
+	}
+
 	switch( args[0] ) {
 
 	// --- core ---
@@ -888,6 +898,8 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 		// Fix: no-op.  Loading progress won't be visible, but the game
 		// will load correctly and both double-buffers will be clean.
 		return 0;
+	case 18: /* trap_UpdateScreen (alternate call site, same as 16) */
+		return 0;
 
 	// --- collision ---
 	case SPCG_CM_LOADMAP:
@@ -909,8 +921,7 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 	case SPCG_CM_TRANSFORMEDBOXTRACE:
 		CM_TransformedBoxTrace( VMA(1), VMA(2), VMA(3), VMA(4), VMA(5), args[6], args[7], VMA(8), VMA(9), /*capsule*/ qfalse );
 		return 0;
-	case SPCG_CM_MARKFRAGMENTS:
-		return re.MarkFragments( args[1], VMA(2), VMA(3), args[4], VMA(5), args[6], VMA(7) );
+	/* CM_MarkFragments is NOT a cgame syscall - uses gi.* direct import */
 
 	// --- sound ---
 	case SPCG_S_STARTSOUND:
@@ -992,11 +1003,22 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 		return 0;
 
 	// --- renderer ---
-	case SPCG_R_LOADWORLDMAP:
-		re.LoadWorld( VMA(1) );
+	case SPCG_R_LOADWORLDMAP: {
+		const char *name = (const char *)VMA(1);
+		Com_Printf( "[REG_DBG] LoadWorld: args[1]=%p str='%.64s'\n", (void*)args[1], name ? name : "NULL" );
+		re.LoadWorld( name );
 		return 0;
-	case SPCG_R_REGISTERMODEL:
-		return re.RegisterModel( VMA(1) );
+	}
+	case SPCG_R_REGISTERMODEL: {
+		const char *name = (const char *)VMA(1);
+		static int regModelCount = 0;
+		regModelCount++;
+		if ( regModelCount <= 5 ) {
+			Com_Printf( "[REG_DBG] RegisterModel #%d: args[1]=%p str='%.64s'\n",
+				regModelCount, (void*)args[1], name ? name : "NULL" );
+		}
+		return re.RegisterModel( name );
+	}
 	case SPCG_R_REGISTERSKIN:
 		return re.RegisterSkin( VMA(1) );
 	case SPCG_R_REGISTERSHADER:

@@ -2265,11 +2265,12 @@ static intptr_t QDECL SV_SP_CgameSyscallStub( intptr_t arg, ... ) {
 		return 0;
 	}
 
-	/* Block renderer calls (SPCG_R_* = indices 38-55) during server
-	   context.  The renderer is only valid during the client's frame
-	   rendering pass.  Let everything else through (cvars, sound,
-	   collision, filesystem, etc.) to match original engine behavior. */
-	if ( arg >= 38 && arg <= 55 ) {
+	/* Block renderer DRAW calls during server context (scene setup/render).
+	   Allow registration calls and client state queries to pass through.
+	   Corrected syscall table: ClearScene=43 through LerpTag=51 are the
+	   draw-time calls. Registration calls (34-42) and client queries
+	   (52+) must work during RunFrame. */
+	if ( arg >= 43 && arg <= 51 ) {
 		return 0;
 	}
 
