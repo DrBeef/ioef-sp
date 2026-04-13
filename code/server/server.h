@@ -430,6 +430,7 @@ void		*SV_SP_GetRawPlayerState( void );
 sp_entityState_t *SV_SP_GetRawEntityState( int entNum );
 void		SV_SP_UnloadDLL( void );
 void		SV_SP_SaveCgameSyscall( intptr_t (*syscall)( intptr_t, ... ) );
+void		SV_SP_SetCgameReady( qboolean ready );
 qboolean	SV_SP_SaveGame( const char *slotName );
 qboolean	SV_SP_LoadGame( const char *slotName );
 qboolean	SV_SP_WipeSaveGame( const char *slotName );

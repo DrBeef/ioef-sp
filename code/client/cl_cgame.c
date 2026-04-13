@@ -820,6 +820,12 @@ void CL_InitCGame( void ) {
 
 				clc.state = CA_LOADING;
 				VM_Call( cgvm, CG_INIT, clc.serverMessageSequence );
+				/* Mark cgame as ready so the syscall stub can forward
+				   cgame traps during server-side game calls. */
+				{
+					extern void SV_SP_SetCgameReady( qboolean ready );
+					SV_SP_SetCgameReady( qtrue );
+				}
 				Com_Printf( "SP cgame initialized from efgamex86.dll\n" );
 			} else {
 				Com_Error( ERR_DROP, "SP cgame: efgamex86.dll missing dllEntry/vmMain" );

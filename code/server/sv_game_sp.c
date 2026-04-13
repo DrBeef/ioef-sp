@@ -2204,8 +2204,52 @@ The server never actually needs cgame functionality; we just need the
 syscall pointer to not be -1 so that accidental calls don't crash.
 ===============
 */
+/*
+The original EF engine uses ONE syscall dispatcher for ALL traps
+at ALL times -- no stub swapping.  When game code (e.g. ICARUS
+camera commands) calls cgame traps during RunFrame, the original
+engine handles them normally.
+
+Our stub now forwards to CL_SPCgameSystemCalls directly, matching
+original engine behavior.  The old stub returned 0 for everything,
+silently breaking sound effects, cvar changes, camera state, and
+ICARUS task completions during game execution.
+*/
+extern intptr_t CL_SPCgameSystemCalls( intptr_t *args );
+
+static qboolean sp_cgameReady = qfalse;
+
 static intptr_t QDECL SV_SP_CgameSyscallStub( intptr_t arg, ... ) {
-	return 0;
+	intptr_t args[16];
+	va_list ap;
+	int i;
+
+	/* Only forward to real cgame handler after cgame has been
+	   initialized.  Before that, return 0 to avoid NULL pointer
+	   crashes from uninitialized cgame state. */
+	if ( !sp_cgameReady ) {
+		return 0;
+	}
+
+	/* Block renderer calls (SPCG_R_* = indices 38-55) during server
+	   context.  The renderer is only valid during the client's frame
+	   rendering pass.  Let everything else through (cvars, sound,
+	   collision, filesystem, etc.) to match original engine behavior. */
+	if ( arg >= 38 && arg <= 55 ) {
+		return 0;
+	}
+
+	args[0] = arg;
+	va_start( ap, arg );
+	for ( i = 1; i < 16; i++ ) {
+		args[i] = va_arg( ap, intptr_t );
+	}
+	va_end( ap );
+	return CL_SPCgameSystemCalls( args );
+}
+
+void SV_SP_SetCgameReady( qboolean ready ) {
+	sp_cgameReady = ready;
 }
 
 /*
