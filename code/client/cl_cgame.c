@@ -397,6 +397,12 @@ CL_ShutdonwCGame
 void CL_ShutdownCGame( void ) {
 	Key_SetCatcher( Key_GetCatcher( ) & ~KEYCATCH_CGAME );
 	cls.cgameStarted = qfalse;
+#ifdef ELITEFORCE
+	{
+		extern void SV_SP_SetCgameReady( qboolean ready );
+		SV_SP_SetCgameReady( qfalse );
+	}
+#endif
 	if ( !cgvm ) {
 		return;
 	}
