@@ -65,12 +65,20 @@ static pfn_BinkSetSoundOnOff    pBinkSetSoundOnOff;
 
 /* Active playback state */
 static HBINK        binkHandle = NULL;
-static byte         *binkBuffer = NULL;
+static byte         *binkBuffer = NULL;     /* decoded frame (video dimensions) */
+static byte         *binkPaddedBuf = NULL;  /* padded to power-of-2 for renderer */
 static int          binkWidth, binkHeight;
+static int          binkPadW, binkPadH;     /* power-of-2 padded dimensions */
 static int          binkX, binkY, binkW, binkH;  /* display rect */
 static qboolean     binkLooping;
 static qboolean     binkPlaying;
 static int          binkStartTime;
+
+static int nextPow2( int v ) {
+	int p = 1;
+	while ( p < v ) p <<= 1;
+	return p;
+}
 
 /* ---- DLL loading ---- */
 
@@ -96,6 +104,7 @@ static qboolean CIN_Bink_LoadDLL( void ) {
 
 	if ( !pBinkOpen || !pBinkClose || !pBinkDoFrame || !pBinkNextFrame ||
 			!pBinkWait || !pBinkCopyToBuffer ) {
+		Com_Printf( "Bink: stdcall names failed, trying cdecl...\n" );
 		/* Try undecorated names (some Bink versions use cdecl) */
 		pBinkOpen          = (pfn_BinkOpen)GetProcAddress( binkLib, "BinkOpen" );
 		pBinkClose         = (pfn_BinkClose)GetProcAddress( binkLib, "BinkClose" );
@@ -161,6 +170,8 @@ int CIN_Bink_Open( const char *filename, int x, int y, int w, int h, int systemB
 
 	binkWidth = binkHandle->Width;
 	binkHeight = binkHandle->Height;
+	binkPadW = nextPow2( binkWidth );
+	binkPadH = nextPow2( binkHeight );
 	binkX = x;
 	binkY = y;
 	binkW = w ? w : cls.glconfig.vidWidth;
@@ -169,8 +180,9 @@ int CIN_Bink_Open( const char *filename, int x, int y, int w, int h, int systemB
 	binkPlaying = qtrue;
 	binkStartTime = cls.realtime;
 
-	/* Allocate RGBA buffer for decoded frames */
-	binkBuffer = (byte *)Z_Malloc( binkWidth * binkHeight * 4 );
+	/* Allocate RGBA buffers - padded to power-of-2 for the renderer */
+	binkBuffer = (byte *)Z_Malloc( binkPadW * binkPadH * 4 );
+	Com_Memset( binkBuffer, 0, binkPadW * binkPadH * 4 );
 
 	Com_Printf( "Bink: playing '%s' (%dx%d, %d frames)\n",
 		filename, binkWidth, binkHeight, binkHandle->Frames );
@@ -188,28 +200,32 @@ e_status CIN_Bink_RunFrame( void ) {
 		return FMV_EOF;
 	}
 
-	/* Wait for the right time to show this frame */
-	if ( !pBinkWait( binkHandle ) ) {
-		/* Decode the frame */
-		pBinkDoFrame( binkHandle );
-
-		/* Copy to our RGBA buffer */
-		pBinkCopyToBuffer( binkHandle, binkBuffer,
-			binkWidth * 4, binkHeight, 0, 0, BINKSURFACE32R );
-
-		/* Advance to next frame */
-		if ( binkHandle->FrameNum >= binkHandle->Frames ) {
-			if ( binkLooping ) {
-				/* TODO: seek to start */
-				pBinkNextFrame( binkHandle );
-			} else {
-				binkPlaying = qfalse;
-				return FMV_EOF;
-			}
+	/* Check if at end */
+	if ( binkHandle->FrameNum >= binkHandle->Frames ) {
+		if ( binkLooping ) {
+			/* TODO: seek to start */
 		} else {
-			pBinkNextFrame( binkHandle );
+			binkPlaying = qfalse;
+			return FMV_EOF;
 		}
 	}
+
+	/* Wait returns 0 when it's time to decompress a frame */
+	while ( pBinkWait( binkHandle ) ) {
+		/* Not time yet - just return and show current frame */
+		return FMV_PLAY;
+	}
+
+	/* Decompress the current frame */
+	pBinkDoFrame( binkHandle );
+
+	/* Copy decoded frame to our RGBA buffer (padded to power-of-2).
+	   Use padded pitch so rows align to the power-of-2 texture width. */
+	pBinkCopyToBuffer( binkHandle, binkBuffer,
+		binkPadW * 4, binkPadH, 0, 0, BINKSURFACE32 );
+
+	/* Advance to next frame */
+	pBinkNextFrame( binkHandle );
 
 	return FMV_PLAY;
 }
@@ -219,9 +235,27 @@ void CIN_Bink_Draw( void ) {
 		return;
 	}
 
-	/* Upload decoded frame to renderer and draw as fullscreen quad */
-	re.DrawStretchRaw( binkX, binkY, binkW, binkH,
-		binkWidth, binkHeight, binkBuffer, 0, qtrue );
+	/* Swap BGRA→RGBA in the buffer since RE_StretchRaw uses GL_RGBA.
+	   Bink's BINKSURFACE32 outputs BGRA on little-endian x86. */
+	{
+		int i, total = binkPadW * binkPadH;
+		byte *p = binkBuffer;
+		for ( i = 0; i < total; i++, p += 4 ) {
+			byte tmp = p[0];
+			p[0] = p[2];
+			p[2] = tmp;
+		}
+	}
+
+	/* Upload decoded frame to renderer as power-of-2 texture.
+	   Scale the draw rect taller to compensate for the padding at the
+	   bottom, so only the actual video content is visible in the
+	   original binkW x binkH area. */
+	{
+		int scaledH = binkH * binkPadH / binkHeight;
+		re.DrawStretchRaw( binkX, binkY, binkW, scaledH,
+			binkPadW, binkPadH, binkBuffer, 0, qtrue );
+	}
 }
 
 void CIN_Bink_Close( void ) {
@@ -233,6 +267,7 @@ void CIN_Bink_Close( void ) {
 		Z_Free( binkBuffer );
 		binkBuffer = NULL;
 	}
+	binkPaddedBuf = NULL;
 	binkPlaying = qfalse;
 }
 
