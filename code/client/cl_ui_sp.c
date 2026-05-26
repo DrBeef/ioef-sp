@@ -819,7 +819,13 @@ static qboolean CL_SP_UI_SG_GameAllowedToSaveHere( qboolean inCamera ) {
 	if ( ge && ge->GameAllowedToSaveHere ) {
 		return ge->GameAllowedToSaveHere();
 	}
-	return qfalse;
+	// No game module loaded -- e.g. at the main menu with no map running.
+	// The SP UI's UI_SetActiveMenu() uses this as a gate before bringing up
+	// ANY menu, so returning qfalse here prevents the main menu from ever
+	// appearing (the engine then draws the full-screen console instead,
+	// because clc.state==CA_DISCONNECTED and KEYCATCH_UI is never set).
+	// With no in-progress game there is nothing to block, so allow it.
+	return qtrue;
 }
 
 /*
@@ -1222,8 +1228,14 @@ intptr_t QDECL CL_SP_UIVmMain( int command, ... ) {
 		return 0;
 
 	case UI_IS_FULLSCREEN: {
-		char *menuname = NULL;
+		// The DLL's UI_GetActiveMenu() does strcpy(*menuname, "unknown") when a
+		// menu is active, so *menuname must point to a writable buffer -- passing
+		// a NULL pointer segfaults inside the DLL. We only care about the
+		// fullscreen flag here, but we must supply a real buffer for the name.
+		char menubuf[64];
+		char *menuname = menubuf;
 		qboolean fullscreen = qfalse;
+		menubuf[0] = '\0';
 		ue->UI_GetActiveMenu( &menuname, &fullscreen );
 		return fullscreen;
 	}

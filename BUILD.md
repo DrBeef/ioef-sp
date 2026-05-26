@@ -11,16 +11,18 @@ For experienced developers who already have the toolchains installed:
 
 ```bash
 # 1. Engine (MSYS2 MINGW32 shell)
-cd /e/Github/ioef
-make -j$(nproc)                    # release
-# or: make debug -j$(nproc)       # debug with symbols
+cd /c/DEV/GitHub/Public/ioef-sp          # or wherever the repo is
+make ARCH=x86 BUILD_ELITEFORCE=1 BUILD_MISSIONPACK=0 BUILD_SERVER=0 BUILD_GAME_QVM=0 WINDRES=windres -j$(nproc)        # release
+# or replace `make` with `make debug` for a debug build.
+# (See "Build the Engine" below for why these flags are needed.)
 
-# 2. Game DLLs (VS Developer Command Prompt)
-cd E:\Github\Elite-Reinforce
-msbuild EF_SPMod.sln /p:Configuration=Release /p:Platform=Win32 /m
+# 2. Game DLLs (VS Developer Command Prompt, or full path to MSBuild.exe)
+cd C:\DEV\GitHub\Public\Elite-Reinforce
+msbuild EF_SPMod.sln /p:Configuration=Release /p:Platform=x86 ^
+        /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0.26100.0 /m
 
 # 3. Deploy
-cp /e/Github/Elite-Reinforce/Release/ef{game,ui}x86.dll \
+cp /c/DEV/GitHub/Public/Elite-Reinforce/Release/ef{game,ui}x86.dll \
    build/release-mingw32-x86/baseEF/
 
 # 4. Run
@@ -59,22 +61,33 @@ DLLs at runtime via `GetGameAPI` / `dllEntry` / `vmMain` exports.
 
 ```bash
 pacman -S --needed \
-  mingw-w64-i686-gcc \
+  mingw-w64-i686-toolchain \
   mingw-w64-i686-SDL2 \
   mingw-w64-i686-openal \
   mingw-w64-i686-curl \
   make git
 ```
 
-> **Important:** You must use the MINGW32 shell so that `gcc` resolves to the
-> i686 (32-bit) compiler. If you run from MINGW64, the Makefile will detect
-> `x86_64` and build a 64-bit binary that cannot load the 32-bit game DLLs.
+> The `mingw-w64-i686-toolchain` group provides the 32-bit `gcc` **and**
+> `windres` (from binutils), both of which the build needs.
+
+> **Important:** Use the MINGW32 shell so that `gcc` resolves to the i686
+> (32-bit) compiler. If you run from MINGW64, the Makefile detects `x86_64` and
+> builds a 64-bit binary that cannot load the 32-bit game DLLs. Even from a
+> MINGW32 shell, on some MSYS2 setups `uname -m` still reports `x86_64`; the
+> recommended `ARCH=x86 ... WINDRES=windres` flags (see below) make the build
+> robust against this.
 
 ### Visual Studio (for the game DLLs)
 
 - Visual Studio 2017 or later (2022 recommended).
 - The **Desktop development with C++** workload.
-- Platform toolset v141 or v143.
+- A platform toolset and Windows SDK. The projects ship targeting **v141 +
+  SDK 10.0.15063.0**; if you don't have those exact versions installed, either
+  retarget the solution in VS (right-click solution &rarr; *Retarget solution*)
+  or override at the command line with `/p:PlatformToolset=` and
+  `/p:WindowsTargetPlatformVersion=` (see section 2). v143 + a current Win10/11
+  SDK build cleanly.
 
 ---
 
@@ -83,16 +96,38 @@ pacman -S --needed \
 From the **MSYS2 MINGW32** shell:
 
 ```bash
-cd /e/Github/ioef          # or wherever the repo is
+cd /c/DEV/GitHub/Public/ioef-sp          # or wherever the repo is
 
-# Release build (optimized)
-make -j$(nproc)
+# Release build (optimized) — produces the SP client ioquake3.x86.exe
+make ARCH=x86 BUILD_ELITEFORCE=1 BUILD_MISSIONPACK=0 BUILD_SERVER=0 BUILD_GAME_QVM=0 WINDRES=windres -j$(nproc)
 
-# --- OR --- Debug build (with symbols, no optimization)
-make debug -j$(nproc)
+# --- OR --- Debug build (with symbols, no optimization): replace `make` with `make debug`
 ```
 
 Output goes to `build/release-mingw32-x86/` (or `build/debug-mingw32-x86/`).
+
+#### Why these flags
+
+`BUILD_ELITEFORCE=1`, `BUILD_MISSIONPACK=0`, and `BUILD_SERVER=0` are **mandatory**
+for an EF SP build (they reflect the current state of the SP source). `ARCH`,
+`WINDRES`, and `BUILD_GAME_QVM` make the build reliable across MSYS2 setups; in
+an ideal MINGW32 shell those three are harmless no-ops.
+
+| Flag | Reason |
+|------|--------|
+| `BUILD_ELITEFORCE=1` | **Required.** Defines `ELITEFORCE` and switches the game dir to `baseEF/` (version 1.38, `STEF1` master server). Without it the engine builds as stock ioquake3, looks in `baseq3/`, and aborts at startup with `"pak0.pk3" is missing`. |
+| `BUILD_MISSIONPACK=0` | Team Arena's `bg_misc.c` uses `entityState_t.generic1`, a field the EF `entityState_t` removed, so missionpack fails to compile under `ELITEFORCE`. EF doesn't use missionpack. |
+| `BUILD_SERVER=0` | The dedicated server (`ioq3ded`) fails to link: the SP bridge in `sv_game_sp.c` / `sv_init.c` references client-only functions (`CL_ShutdownCGame`, `CL_SP_GetStoredSaveComment`, `CL_SP_CopySaveScreenshot`). SP runs the client binary only. |
+| `ARCH=x86` | Forces a 32-bit build. On some MSYS2 installs `uname -m` reports `x86_64` even from the MINGW32 shell, so without this the Makefile builds 64-bit and fails with `cc1.exe: sorry, unimplemented: 64-bit mode not compiled in`. |
+| `WINDRES=windres` | Forcing `ARCH=x86` trips the Makefile's `CROSS_COMPILING` logic, which then looks for a prefixed `i686-w64-mingw32-windres` that the MINGW32 toolchain doesn't ship. Only plain `windres.exe` exists. Without this, the `.rc` resource compile silently fails (Error 127) and the final link aborts with `cannot find .../win_resource.o`. |
+| `BUILD_GAME_QVM=0` | Skips QVM bytecode compilation, which fails on GCC 15+ (see the `constexpr` note under Troubleshooting) and is not needed for SP. |
+
+> **Gotcha:** Make does not track changes to command-line variables. If you
+> built once and then add/change a flag like `BUILD_ELITEFORCE=1`, the existing
+> `.o` files look up to date and make will *not* recompile them — you'll get a
+> stale binary. Run `make clean-release ARCH=x86` first (this only removes
+> object files and target binaries; it leaves `baseEF/` and its paks/DLLs
+> intact), then rebuild.
 
 ### Key files produced
 
@@ -111,7 +146,7 @@ build/release-mingw32-x86/
 | `BUILD_CLIENT` | 1 | Build the client binary |
 | `BUILD_SERVER` | 1 | Build the dedicated server |
 | `BUILD_GAME_SO` | 0 | Build baseq3 game DLLs (MP; not needed for SP) |
-| `BUILD_GAME_QVM` | 1 | Build QVM bytecode (set to 0 to skip; see GCC 15 note below) |
+| `BUILD_GAME_QVM` | 1 | Build QVM bytecode (set to 0 to skip; required on GCC 15+, see note below) |
 | `USE_OPENAL` | 1 | OpenAL sound backend |
 | `USE_CURL` | 1 | HTTP/FTP download support |
 
@@ -141,25 +176,34 @@ make PLATFORM=mingw32 ARCH=x86 \
 
 ### Using Visual Studio GUI
 
-1. Open `E:\Github\Elite-Reinforce\EF_SPMod.sln` in Visual Studio.
-2. Set the solution configuration to **Release** and platform to **Win32**.
-3. Build the solution (Ctrl+Shift+B) or build each project individually:
+1. Open `C:\DEV\GitHub\Public\Elite-Reinforce\EF_SPMod.sln` in Visual Studio.
+2. Set the solution configuration to **Release** and platform to **x86**.
+3. If prompted that the toolset/SDK (v141 / SDK 10.0.15063.0) is missing,
+   right-click the solution &rarr; *Retarget solution* and pick an installed
+   toolset (e.g. v143) and SDK.
+4. Build the solution (Ctrl+Shift+B) or build each project individually:
    - `game` &rarr; produces `Release/efgamex86.dll`
    - `ui` &rarr; produces `Release/efuix86.dll`
 
 ### Using the command line
 
-From a **Developer Command Prompt for VS**:
+From a **Developer Command Prompt for VS** (or invoke `MSBuild.exe` by full
+path). The solution platform is named **x86** (it maps to `Win32` internally),
+so pass `/p:Platform=x86`:
 
 ```cmd
-cd E:\Github\Elite-Reinforce
+cd C:\DEV\GitHub\Public\Elite-Reinforce
 
-msbuild EF_SPMod.sln /p:Configuration=Release /p:Platform=Win32 /m
+msbuild EF_SPMod.sln /p:Configuration=Release /p:Platform=x86 /m
 
-:: Or build individual projects:
-msbuild game\game.vcxproj /p:Configuration=Release /p:Platform=Win32
-msbuild ui\ui.vcxproj     /p:Configuration=Release /p:Platform=Win32
+:: If the shipped toolset/SDK is not installed, retarget on the command line
+:: (non-persistent; leaves the .vcxproj files unchanged):
+msbuild EF_SPMod.sln /p:Configuration=Release /p:Platform=x86 ^
+        /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0.26100.0 /m
 ```
+
+> The full path to MSBuild for VS 2022 Community is
+> `C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe`.
 
 ### Output
 
@@ -185,11 +229,28 @@ build/release-mingw32-x86/
   ioquake3.x86.exe
   renderer_opengl1_x86.dll
   SDL2.dll
+  libgcc_s_dw2-1.dll      # mingw32 GCC runtime — renderer DLL depends on it
+  libwinpthread-1.dll     # mingw32 runtime (copy alongside)
+  libstdc++-6.dll         # mingw32 runtime (copy alongside)
   baseEF/
     pak0.pk3               # From the original EF1 game disc/install
     pak1.pk3               # (optional) Patch data
     efgamex86.dll          # From Elite-Reinforce/Release/
     efuix86.dll            # From Elite-Reinforce/Release/
+```
+
+### Copying the mingw32 runtime DLLs
+
+`ioquake3.x86.exe` is statically linked, but `renderer_opengl1_x86.dll` imports
+`libgcc_s_dw2-1.dll`. Without it next to the exe, the renderer fails to load
+with `The specified module could not be found` and the engine aborts at
+`Initializing Renderer`. Copy the runtime DLLs from the MINGW32 toolchain:
+
+```bash
+BUILDDIR="build/release-mingw32-x86"
+cp /c/msys64/mingw32/bin/libgcc_s_dw2-1.dll  "$BUILDDIR/"
+cp /c/msys64/mingw32/bin/libwinpthread-1.dll "$BUILDDIR/"
+cp /c/msys64/mingw32/bin/libstdc++-6.dll     "$BUILDDIR/"
 ```
 
 ### Copying game data
@@ -199,11 +260,11 @@ build/release-mingw32-x86/
 BUILDDIR="build/release-mingw32-x86/baseEF"
 
 # Copy original EF1 pak files (adjust source path as needed)
-cp "/e/Downloads/Star Trek - Voyager - Elite Force (USA) (Rerelease)/extracted/Setup/baseEF/pak0.pk3" "$BUILDDIR/"
+cp "/c/Program Files (x86)/GOG Galaxy/Games/Star Trek Elite Force/baseEF/"*.pk3 "$BUILDDIR/"
 
 # Copy built SP DLLs
-cp /e/Github/Elite-Reinforce/Release/efgamex86.dll "$BUILDDIR/"
-cp /e/Github/Elite-Reinforce/Release/efuix86.dll   "$BUILDDIR/"
+cp /c/DEV/GitHub/Public/Elite-Reinforce/Release/efgamex86.dll "$BUILDDIR/"
+cp /c/DEV/GitHub/Public/Elite-Reinforce/Release/efuix86.dll   "$BUILDDIR/"
 ```
 
 ---
@@ -368,18 +429,19 @@ The `sp_game` cvar triggers an alternate code path:
 
 ### Common build errors
 
-#### GCC 15 `constexpr` keyword conflict
+#### GCC 15+ `constexpr` keyword conflict
 
 **Symptom:** Build fails in `code/tools/lcc/` with errors about `constexpr`
 being a reserved keyword.
 
-**Cause:** GCC 15 added `constexpr` as a C23 keyword. The LCC tool (QVM
-compiler) uses `constexpr` as an identifier in its own source code.
+**Cause:** GCC 15 added `constexpr` as a C23 keyword (the issue persists on
+GCC 16, the current MSYS2 i686 toolchain). The LCC tool (QVM compiler) uses
+`constexpr` as an identifier in its own source code.
 
 **Fix:** Disable QVM building, which is not needed for SP development:
 
 ```bash
-make -j$(nproc) BUILD_GAME_QVM=0
+make ARCH=x86 BUILD_ELITEFORCE=1 WINDRES=windres -j$(nproc) BUILD_GAME_QVM=0
 ```
 
 #### JPEG struct redefinition / type mismatch
@@ -425,10 +487,15 @@ whether to reset settings, which blocks headless or automated launches.
 
 | Problem | Solution |
 |---------|----------|
+| `"pak0.pk3" is missing ... baseq3 directory` | The engine was built **without** `BUILD_ELITEFORCE=1`, so it's looking in `baseq3/` instead of `baseEF/`. Rebuild with `BUILD_ELITEFORCE=1` (run `make clean-release ARCH=x86` first — see the gotcha under "Build the Engine"). |
+| Compile error: `entityState_t ... has no member named 'generic1'` | A missionpack source file under `ELITEFORCE`. Add `BUILD_MISSIONPACK=0`. |
+| Link error: undefined reference to `CL_ShutdownCGame` / `CL_SP_GetStoredSaveComment` / `CL_SP_CopySaveScreenshot` | The dedicated-server link pulling in client-only SP bridge symbols. Add `BUILD_SERVER=0` (SP uses the client binary only). |
 | `failed to load efgamex86.dll` | Ensure the DLL is in `baseEF/` and is 32-bit. |
 | `Unpure client detected` | Should be auto-fixed by SP mode setting `sv_pure 0`. If not, add `+set sv_pure 0` to launch args. |
 | `GetGameAPI returned NULL` | DLL loaded but export not found. Check DLL was built from Elite-Reinforce source (needs `GetGameAPI` export). |
 | `game API version mismatch` | DLL API version doesn't match expected version 6. Rebuild DLLs. |
-| Engine builds as 64-bit | Use the MSYS2 MINGW32 shell, not MINGW64. Or set `ARCH=x86` explicitly. |
+| Engine builds as 64-bit (`64-bit mode not compiled in`) | Use the MSYS2 MINGW32 shell, not MINGW64. If `uname -m` still reports `x86_64`, set `ARCH=x86` explicitly. |
+| Link fails: `cannot find .../win_resource.o` | The `windres` resource compile failed (often Error 127). Pass `WINDRES=windres` so it uses the unprefixed binary instead of a missing `i686-w64-mingw32-windres`. |
 | `uname: command not found` | Run `make` from MSYS2 shell, not PowerShell or cmd. The Makefile requires Unix utilities. |
 | Missing `SDL2.dll` | Install `mingw-w64-i686-SDL2` via pacman. The Makefile copies it to the build directory. |
+| Renderer fails to load: `The specified module could not be found` | `renderer_opengl1_x86.dll` needs `libgcc_s_dw2-1.dll` next to the exe. Copy the mingw32 runtime DLLs (see "Copying the mingw32 runtime DLLs"). |

@@ -519,7 +519,21 @@ static void SV_SP_SyncToShared( sp_gentity_t *sp_ent ) {
 	// These fields control collision, PVS visibility, and area portal state.
 	se->r.linked       = sp_ent->linked;
 	se->r.linkcount    = 0;
-	se->r.svFlags      = sp_ent->svFlags;
+	/*
+	 * Translate SP svFlags -> engine svFlags.  The two games assign DIFFERENT
+	 * meanings to most svFlags bits, and several SP bits collide with engine
+	 * snapshot-control flags:
+	 *   SP SVF_NPC (0x4)          == engine SVF_CLIENTMASK
+	 *   SP SVF_TRIMODEL (0x100)   == engine SVF_SINGLECLIENT
+	 *   SP SVF_NPC_PRECACHE (0x800) == engine SVF_NOTSINGLECLIENT
+	 * Raw-copying meant every NPC (SVF_NPC) looked like SVF_CLIENTMASK to the
+	 * snapshot builder, which then sent it only to an all-zero client mask --
+	 * i.e. to nobody -- so enemies spawned but were invisible.  Forward ONLY
+	 * the bits whose meaning (and value) is identical in both games; drop the
+	 * SP-specific flags.
+	 */
+	se->r.svFlags      = sp_ent->svFlags &
+		( SVF_NOCLIENT | SVF_BROADCAST | SVF_PORTAL | SVF_USE_CURRENT_ORIGIN );
 	se->r.singleClient = 0;
 	se->r.bmodel       = sp_ent->bmodel;
 	VectorCopy( sp_ent->mins, se->r.mins );

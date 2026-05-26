@@ -15,18 +15,25 @@ The SP game module (`efgamex86.dll`, built from the separate Elite-Reinforce rep
 The build system is GNU Make. On Windows, use the **MSYS2 MINGW32** shell (not MINGW64) to produce 32-bit binaries compatible with the SP game DLLs.
 
 ```bash
-# Release build (default)
-make -j$(nproc)
+# Release build (full known-good Windows invocation — see flag notes below)
+make ARCH=x86 BUILD_ELITEFORCE=1 BUILD_MISSIONPACK=0 BUILD_SERVER=0 BUILD_GAME_QVM=0 WINDRES=windres -j$(nproc)
 
 # Debug build (with -ggdb -O0)
-make debug -j$(nproc)
+make debug ARCH=x86 BUILD_ELITEFORCE=1 BUILD_MISSIONPACK=0 BUILD_SERVER=0 BUILD_GAME_QVM=0 WINDRES=windres -j$(nproc)
 
-# Client only, no dedicated server
-make -j$(nproc) BUILD_SERVER=0
-
-# Clean all build artifacts
+# Clean all build artifacts (or clean-release ARCH=x86 to keep baseEF/ paks+DLLs)
 make clean
 ```
+
+This produces the SP client `ioquake3.x86.exe`. Flag rationale (all six are needed on this Windows/MSYS2 setup):
+- `BUILD_ELITEFORCE=1` — **required for Elite Force.** Without it the engine builds as stock ioquake3 and looks for `baseq3/pak0.pk3` instead of `baseEF/`, failing at startup with `"pak0.pk3" is missing`. Defines `ELITEFORCE`, sets the game dir to `baseEF/`, version 1.38, and the `STEF1` master server.
+- `BUILD_MISSIONPACK=0` — Team Arena's `bg_misc.c` references `entityState_t.generic1`, which the EF `entityState_t` doesn't have. Building missionpack under `ELITEFORCE` fails; EF doesn't use it.
+- `BUILD_SERVER=0` — the dedicated server (`ioq3ded`) can't link: the SP bridge in `sv_game_sp.c`/`sv_init.c` references client-only functions (`CL_ShutdownCGame`, `CL_SP_GetStoredSaveComment`, `CL_SP_CopySaveScreenshot`). SP runs the client only.
+- `ARCH=x86` — on some MSYS2 setups `uname -m` reports `x86_64` even from the MINGW32 shell, so the build otherwise targets 64-bit and fails with `cc1.exe: sorry, unimplemented: 64-bit mode not compiled in`.
+- `WINDRES=windres` — forcing `ARCH=x86` trips the Makefile's `CROSS_COMPILING` path, which hunts for a prefixed `i686-w64-mingw32-windres` that the toolchain doesn't ship (only plain `windres.exe` exists). Without this the resource compile fails (Error 127) and linking aborts with `cannot find .../win_resource.o`.
+- `BUILD_GAME_QVM=0` — the LCC QVM compiler in `code/tools/` has a `constexpr` keyword conflict on GCC 15+ (the current MSYS2 i686 gcc is 16.x). QVM bytecode isn't needed for SP.
+
+**Gotcha:** Make does not track changes to command-line variables — after changing a flag (e.g. adding `BUILD_ELITEFORCE=1`), existing `.o` files look up to date and you get a stale binary. Run `make clean-release ARCH=x86` first (removes only objects + target binaries; leaves `baseEF/` intact), then rebuild.
 
 Build output goes to `build/release-<platform>-<arch>/` or `build/debug-<platform>-<arch>/`. On Windows with MINGW32, that's `build/release-mingw32-x86/`.
 
@@ -37,9 +44,14 @@ Cross-compile for Windows from Linux:
 make PLATFORM=mingw32 ARCH=x86 CC=i686-w64-mingw32-gcc WINDRES=i686-w64-mingw32-windres -j$(nproc)
 ```
 
-**GCC 15 note:** The LCC tool (QVM compiler in `code/tools/`) has a `constexpr` keyword conflict with GCC 15. Disable QVM building (`BUILD_GAME_QVM=0`) to work around this.
+SP game DLLs are built separately with Visual Studio from the Elite-Reinforce source (`C:\DEV\GitHub\Public\Elite-Reinforce\EF_SPMod.sln`), not from this Makefile. Build them with msbuild — the solution platform is named `x86` (maps to `Win32` internally), and the projects ship targeting toolset v141 + SDK 10.0.15063.0, so retarget to an installed toolset/SDK if those aren't present:
 
-SP game DLLs are built separately with Visual Studio from the Elite-Reinforce source (`E:\Github\Elite-Reinforce\EF_SPMod.sln`), not from this Makefile.
+```bash
+msbuild EF_SPMod.sln /p:Configuration=Release /p:Platform=x86 \
+        /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0.26100.0 /m
+```
+
+After building, copy the resulting `efgamex86.dll` and `efuix86.dll` (from `Elite-Reinforce/Release/`) into the build's `baseEF/` directory (e.g. `build/release-mingw32-x86/baseEF/`) — the engine loads them from there at runtime. See `BUILD.md` for full toolchain setup and deploy steps.
 
 There is no automated test suite. CI is Travis CI with GCC/Clang builds and Coverity static analysis.
 

@@ -457,7 +457,13 @@ static void SV_AreaEntities_r( worldSector_t *node, areaParms_t *ap ) {
 		}
 
 		if ( ap->count == ap->maxcount ) {
-			Com_Printf ("SV_AreaEntities: MAXCOUNT\n");
+			// Rate-limited: SP can hit this constantly (dense areas / NPC
+			// vision traces), and printing every frame tanks performance and
+			// floods the log.
+			static int sv_areaMaxcountSpam = 0;
+			if ( sv_areaMaxcountSpam++ < 10 ) {
+				Com_Printf ("SV_AreaEntities: MAXCOUNT\n");
+			}
 			return;
 		}
 

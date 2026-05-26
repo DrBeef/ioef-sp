@@ -628,8 +628,38 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 		return CL_GetServerCommand( args[1] );
 	case SPCG_GETCURRENTCMDNUMBER:
 		return CL_GetCurrentCmdNumber();
-	case SPCG_GETUSERCMD:
-		return CL_GetUserCmd( args[1], VMA(2) );
+	case SPCG_GETUSERCMD: {
+		/*
+		 * Translate the engine usercmd_t to the SP cgame's sp_usercmd_t.
+		 *
+		 * CL_GetUserCmd() copies the ENGINE usercmd_t (byte buttons), but the
+		 * SP cgame reads its buffer as sp_usercmd_t (int buttons).  The
+		 * differing buttons field size shifts every field after it by 3-4
+		 * bytes, so the cgame's client-side movement prediction reads angles[]
+		 * one int off -- yaw lands in pitch, pitch lands in roll, roll picks up
+		 * forwardmove.  Result: mouse left/right tilts the view up/down, mouse
+		 * up/down does nothing, and moving disturbs the camera, even though the
+		 * server (which translates correctly in GAME_CLIENT_THINK) moves the
+		 * player fine.  Translate field-by-field, mirroring the server side.
+		 */
+		usercmd_t engineCmd;
+		sp_usercmd_t *spCmd = (sp_usercmd_t *)VMA(2);
+
+		if ( !CL_GetUserCmd( args[1], &engineCmd ) ) {
+			return qfalse;
+		}
+
+		spCmd->serverTime  = engineCmd.serverTime;
+		spCmd->buttons     = engineCmd.buttons;
+		spCmd->weapon      = engineCmd.weapon;
+		spCmd->angles[0]   = engineCmd.angles[0];
+		spCmd->angles[1]   = engineCmd.angles[1];
+		spCmd->angles[2]   = engineCmd.angles[2];
+		spCmd->forwardmove = engineCmd.forwardmove;
+		spCmd->rightmove   = engineCmd.rightmove;
+		spCmd->upmove      = engineCmd.upmove;
+		return qtrue;
+	}
 	case SPCG_SETUSERCMDVALUE:
 		CL_SetUserCmdValue( args[1], VMF(2) );
 		return 0;

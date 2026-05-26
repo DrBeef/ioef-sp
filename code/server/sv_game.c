@@ -413,9 +413,39 @@ intptr_t SV_GameSystemCalls( intptr_t *args ) {
 	case G_GET_ENTITY_TOKEN:
 		{
 			const char	*s;
+			char		*dest = (char *)VMA(1);
+			int			destSize = args[2];
+
+			/*
+			 * Defensive guard against an SP DLL misroute.
+			 *
+			 * The EF1 SP efgamex86.dll shares ONE syscall pointer between its
+			 * server-game and client-cgame halves.  Cgame-side force-feedback
+			 * traps (SPCG_FF_STARTFX..SPCG_FF_STOPALLFX == 34..37) fired from
+			 * code shared with the server during ClientThink/RunFrame get
+			 * dispatched through THIS (game) syscall handler, where #37 lands
+			 * on G_GET_ENTITY_TOKEN and Q_strncpyz()'s a garbage pointer ->
+			 * SIGSEGV (seen on weapon fire and on movement after a while).
+			 *
+			 * A real entity-token request only happens at GAME_INIT, where
+			 * sv.entityParsePoint is non-NULL and the caller supplies a valid
+			 * buffer + sane size.  Reject anything else and no-op it (force
+			 * feedback is a no-op in this engine anyway).  This is behaviour-
+			 * neutral for legitimate spawn-time parsing and for MP.
+			 */
+			if ( !sv.entityParsePoint || !dest || destSize <= 0 || destSize > 65536 ) {
+				static int sp_entTokenMisrouteCount = 0;
+				if ( sp_entTokenMisrouteCount < 8 ) {
+					sp_entTokenMisrouteCount++;
+					Com_Printf( S_COLOR_YELLOW "G_GET_ENTITY_TOKEN: ignoring bogus call "
+						"(parsePoint=%p dest=%p size=%i) -- misrouted SP cgame FF trap "
+						"during a game call.\n", (void *)sv.entityParsePoint, (void *)dest, destSize );
+				}
+				return qfalse;
+			}
 
 			s = COM_Parse( &sv.entityParsePoint );
-			Q_strncpyz( VMA(1), s, args[2] );
+			Q_strncpyz( dest, s, destSize );
 			if ( !sv.entityParsePoint && !s[0] ) {
 				return qfalse;
 			} else {
@@ -909,6 +939,73 @@ void SV_ShutdownGameProgs( void ) {
 
 /*
 ==================
+SV_SP_GameSystemCalls
+
+Syscall handler for the Elite Force SP game fake-VM (gvm).  Wraps the normal
+SV_GameSystemCalls but neutralises the force-feedback cgame traps that the
+single combined efgamex86.dll misroutes here.
+
+The DLL shares ONE syscall pointer between its server-game and client-cgame
+halves.  Cgame force-feedback traps (SPCG_FF_STARTFX..SPCG_FF_STOPALLFX ==
+34..37) fired from code shared with the server during ClientThink/RunFrame are
+dispatched through this game handler, where they collide with:
+  34 -> G_BOT_ALLOCATE_CLIENT
+  35 -> G_BOT_FREE_CLIENT      (Com_Error on a bad index)
+  36 -> G_GET_USERCMD          (writes a usercmd to a garbage pointer -> SIGSEGV)
+  37 -> G_GET_ENTITY_TOKEN     (Q_strncpyz on a garbage pointer -> SIGSEGV)
+SP never legitimately uses 34/35/36 (no bots; the usercmd is handed to
+ClientThink directly), and force feedback is a no-op in this engine, so we
+swallow 34-36 here.  #37 is also used for legitimate entity-string parsing,
+but ONLY at GAME_INIT (sv.entityParsePoint != NULL); outside that it is a
+misrouted FF trap, so let it through only while parsing.
+*/
+intptr_t SV_SP_GameSystemCalls( intptr_t *args ) {
+	switch ( args[0] ) {
+	case G_BOT_ALLOCATE_CLIENT:		// SPCG_FF_STARTFX
+	case G_BOT_FREE_CLIENT:			// SPCG_FF_ENSUREFX
+	case G_GET_USERCMD:				// SPCG_FF_STOPFX
+		return 0;
+	case G_GET_ENTITY_TOKEN:		// SPCG_FF_STOPALLFX, or a real entity token at GAME_INIT
+		if ( !sv.entityParsePoint ) {
+			return 0;
+		}
+		break;
+
+	/*
+	 * Pointer-argument sanity guards for the misrouted-cgame-trap problem.
+	 *
+	 * Shared game/cgame code in efgamex86.dll calls CGAME trap numbers through
+	 * the DLL's shared syscall pointer during server-side ClientThink/RunFrame.
+	 * With currentVM==gvm those get dispatched HERE as game syscalls with the
+	 * cgame trap's (mismatched) arguments -- typically a garbage pointer such as
+	 * 0x3fe where a vec3_t* is expected -- which crashes on dereference (seen:
+	 * cgame trap #26 -> G_IN_PVS -> CM_PointLeafnum(0x3fe) -> SIGSEGV).
+	 *
+	 * A real game-side call always passes valid pointers, so reject implausibly
+	 * small pointer values (the bottom 64KB is never a valid user-space address)
+	 * and no-op the call.  This is behaviour-neutral for legitimate callers and
+	 * for MP (MP uses SV_GameSystemCalls directly, not this wrapper).
+	 */
+	case G_IN_PVS:
+	case G_IN_PVS_IGNORE_PORTALS:	// ( const vec3_t p1, const vec3_t p2 )
+		if ( (uintptr_t)args[1] < 0x10000u || (uintptr_t)args[2] < 0x10000u ) {
+			return qfalse;
+		}
+		break;
+	case G_POINT_CONTENTS:			// ( const vec3_t point, int passEntityNum )
+		if ( (uintptr_t)args[1] < 0x10000u ) {
+			return 0;
+		}
+		break;
+
+	default:
+		break;
+	}
+	return SV_GameSystemCalls( args );
+}
+
+/*
+==================
 SV_InitGameVM
 
 Called for both a full init and a restart
@@ -988,7 +1085,7 @@ void SV_InitGameProgs( void ) {
 		bot_enable = 0;
 		Cvar_Set( "sv_pure", "0" );
 		SV_SP_InitGameProgs();
-		gvm = VM_CreateFakeWithSyscall( "qagame_sp", SV_SP_GameVmMain, SV_GameSystemCalls );
+		gvm = VM_CreateFakeWithSyscall( "qagame_sp", SV_SP_GameVmMain, SV_SP_GameSystemCalls );
 		if ( !gvm ) {
 			Com_Error( ERR_FATAL, "VM_CreateFake for SP game failed" );
 		}
