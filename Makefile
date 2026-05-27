@@ -35,6 +35,9 @@ endif
 ifndef BUILD_ELITEFORCE
   BUILD_ELITEFORCE =
 endif
+ifndef BUILD_VR
+  BUILD_VR=0
+endif
 ifndef BUILD_RENDERER_OPENGL2
   BUILD_RENDERER_OPENGL2=0
 endif
@@ -250,6 +253,7 @@ RGL1DIR=$(MOUNT_DIR)/renderergl1
 RGL2DIR=$(MOUNT_DIR)/renderergl2
 CMDIR=$(MOUNT_DIR)/qcommon
 SDLDIR=$(MOUNT_DIR)/sdl
+VRDIR=$(MOUNT_DIR)/vr
 ASMDIR=$(MOUNT_DIR)/asm
 SYSDIR=$(MOUNT_DIR)/sys
 GDIR=$(MOUNT_DIR)/game
@@ -679,6 +683,31 @@ ifdef MINGW
     CLIENT_LIBS += $(SDL_LIBS)
     RENDERER_LIBS += $(SDL_LIBS)
     SDLDLL=SDL2.dll
+  endif
+
+  # ---- OpenXR VR (BUILD_VR=1) -- Windows/PCVR, 64-bit only --------------------
+  # The VR layer (code/vr) and the renderer both include the vendored OpenXR
+  # headers in code/vr/openxr (via CLIENT_CFLAGS, which DO_REF_CC also consumes).
+  # The client binary owns the global `vr` struct: -DEFXR_CLIENT is added through
+  # DO_CC only (see CLIENT_ONLY_CFLAGS), so the renderer DLL -- compiled with
+  # DO_REF_CC -- instead sees `vr` as a pointer it receives via GetRefAPI,
+  # matching the RealRTCWXR cross-module pattern.  Only the client binary links
+  # the OpenXR loader.
+  ifeq ($(BUILD_VR),1)
+    ifeq ($(ARCH),x86_64)
+      CLIENT_CFLAGS += -DBUILD_VR -DXR_USE_PLATFORM_WIN32 -DXR_USE_GRAPHICS_API_OPENGL \
+                       -I$(VRDIR) -I$(VRDIR)/openxr
+      CLIENT_ONLY_CFLAGS += -DEFXR_CLIENT
+      CLIENT_LIBS += $(LIBSDIR)/win64/libopenxr_loader.dll.a
+      # The VR layer (code/vr) links into the client binary and makes direct
+      # fixed-function GL / WGL calls (glBindTexture, wglGetCurrentDC, ...),
+      # so the client now needs opengl32 (normally only the renderer DLL does).
+      CLIENT_LIBS += -lopengl32
+      CLIENT_EXTRA_FILES += $(LIBSDIR)/win64/libopenxr_loader.dll
+      HAVE_VR=1
+    else
+      $(error BUILD_VR=1 requires ARCH=x86_64)
+    endif
   endif
 
 else # ifdef MINGW
@@ -1163,7 +1192,7 @@ endif
 
 define DO_CC
 $(echo_cmd) "CC $<"
-$(Q)$(CC) $(NOTSHLIBCFLAGS) $(CFLAGS) $(CLIENT_CFLAGS) $(OPTIMIZE) -o $@ -c $<
+$(Q)$(CC) $(NOTSHLIBCFLAGS) $(CFLAGS) $(CLIENT_CFLAGS) $(CLIENT_ONLY_CFLAGS) $(OPTIMIZE) -o $@ -c $<
 endef
 
 define DO_REF_CC
@@ -1688,6 +1717,15 @@ ifdef MINGW
 else
   Q3OBJ += \
     $(B)/client/con_tty.o
+endif
+
+# OpenXR VR layer (code/vr) -- only when BUILD_VR=1 (HAVE_VR set in the MinGW block)
+ifeq ($(HAVE_VR),1)
+  Q3OBJ += \
+    $(B)/client/VrInputCommon.o \
+    $(B)/client/VrCvars.o \
+    $(B)/client/TBXR_Common.o \
+    $(B)/client/EFXR_SurfaceView.o
 endif
 
 Q3R2OBJ = \
@@ -2608,6 +2646,12 @@ $(B)/client/%.o: $(ZDIR)/%.c
 	$(DO_CC)
 
 $(B)/client/%.o: $(SDLDIR)/%.c
+	$(DO_CC)
+
+$(B)/client/%.o: $(VRDIR)/%.c
+	$(DO_CC)
+
+$(B)/client/%.o: $(VRDIR)/windows/%.c
 	$(DO_CC)
 
 $(B)/client/%.o: $(SYSDIR)/%.c
