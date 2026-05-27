@@ -988,10 +988,15 @@ void CL_InitInput( void ) {
 	Cmd_AddCommand ("+button4", IN_Button4Down);
 	Cmd_AddCommand ("-button4", IN_Button4Up);
 #ifdef ELITEFORCE
-	Cmd_AddCommand ("+altattack", IN_Button5Down);
-	Cmd_AddCommand ("-altattack", IN_Button5Up);
-	Cmd_AddCommand ("+use", IN_Button6Down);
-	Cmd_AddCommand ("-use", IN_Button6Up);
+	// Map the EF keys to the bits the Elite Force SP game module reads
+	// (game/q_shared.h): BUTTON_USE = 32 (bit 5) and BUTTON_ALT_ATTACK = 128
+	// (bit 7).  CL_CmdButtons sets `buttons |= 1 << i` for in_buttons[i], so
+	// +use -> button5 -> bit 5 and +altattack -> button7 -> bit 7.  (The cgame
+	// already triggers "use" via +button5, so this matches it.)
+	Cmd_AddCommand ("+altattack", IN_Button7Down);
+	Cmd_AddCommand ("-altattack", IN_Button7Up);
+	Cmd_AddCommand ("+use", IN_Button5Down);
+	Cmd_AddCommand ("-use", IN_Button5Up);
 #endif
 	Cmd_AddCommand ("+button5", IN_Button5Down);
 	Cmd_AddCommand ("-button5", IN_Button5Up);
