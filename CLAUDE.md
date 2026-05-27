@@ -8,7 +8,7 @@ ioEF is a fork of ioquake3 (open-source Quake 3 engine) extended with **Star Tre
 
 When built with `BUILD_ELITEFORCE=1`, the engine defines `ELITEFORCE` and uses `baseEF/` as the game data directory, version 1.38, and the `STEF1` master server heartbeat. Without it, it builds as standard ioquake3 (`baseq3/`, version 1.36).
 
-The SP game module (`efgamex86.dll`, built from the separate Elite-Reinforce repository) uses a **Q2-style `GetGameAPI`** interface, not Q3 VM syscalls. A single `efgamex86.dll` contains **both** server game logic (via `GetGameAPI`) and client cgame rendering (via `dllEntry`/`vmMain`). The UI module (`efuix86.dll`) uses `GetUIAPI`.
+The SP game module (`efgamex86.dll`, built from the separate Elite-Force-VR repository) uses a **Q2-style `GetGameAPI`** interface, not Q3 VM syscalls. A single `efgamex86.dll` contains **both** server game logic (via `GetGameAPI`) and client cgame rendering (via `dllEntry`/`vmMain`). The UI module (`efuix86.dll`) uses `GetUIAPI`.
 
 ## Build Commands
 
@@ -44,14 +44,14 @@ Cross-compile for Windows from Linux:
 make PLATFORM=mingw32 ARCH=x86 CC=i686-w64-mingw32-gcc WINDRES=i686-w64-mingw32-windres -j$(nproc)
 ```
 
-SP game DLLs are built separately with Visual Studio from the Elite-Reinforce source (`C:\DEV\GitHub\Public\Elite-Reinforce\EF_SPMod.sln`), not from this Makefile. Build them with msbuild — the solution platform is named `x86` (maps to `Win32` internally), and the projects ship targeting toolset v141 + SDK 10.0.15063.0, so retarget to an installed toolset/SDK if those aren't present:
+SP game DLLs are built separately with Visual Studio from the Elite-Force-VR source (`C:\DEV\GitHub\Public\Elite-Force-VR\EF_SPMod.sln`), not from this Makefile. (Elite-Force-VR has git submodules under `speedrun/` — run `git submodule update --init --recursive` after a fresh clone or the game project won't find those sources.) Build them with msbuild — the solution platform is named `x86` (maps to `Win32` internally), and the projects ship targeting toolset v141 + SDK 10.0.15063.0, so retarget to an installed toolset/SDK if those aren't present:
 
 ```bash
 msbuild EF_SPMod.sln /p:Configuration=Release /p:Platform=x86 \
         /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0.26100.0 /m
 ```
 
-After building, copy the resulting `efgamex86.dll` and `efuix86.dll` (from `Elite-Reinforce/Release/`) into the build's `baseEF/` directory (e.g. `build/release-mingw32-x86/baseEF/`) — the engine loads them from there at runtime. See `BUILD.md` for full toolchain setup and deploy steps.
+After building, copy the resulting `efgamex86.dll` and `efuix86.dll` (from `Elite-Force-VR/Release/`) into the build's `baseEF/` directory (e.g. `build/release-mingw32-x86/baseEF/`) — the engine loads them from there at runtime. See `BUILD.md` for full toolchain setup and deploy steps.
 
 There is no automated test suite. CI is Travis CI with GCC/Clang builds and Coverity static analysis.
 
