@@ -141,6 +141,10 @@ typedef struct
 	void (*DisableSounds)( void );
 	void (*BeginRegistration)( void );
 	sfxHandle_t (*RegisterSound)( const char *sample, qboolean compressed );
+	// Duration of a registered sound in milliseconds (backend-agnostic).  Used
+	// by the SP bridge to time scripted voice waits (gi.S_Override) and caption
+	// display; works under both the dma and OpenAL backends.
+	int (*SoundDuration)( sfxHandle_t sfx );
 	void (*ClearSoundBuffer)( void );
 	void (*SoundInfo)( void );
 	void (*SoundList)( void );

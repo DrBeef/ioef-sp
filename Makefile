@@ -614,6 +614,18 @@ ifdef MINGW
   CLIENT_LIBS = -lgdi32 -lole32
   RENDERER_LIBS = -lgdi32 -lole32 -lopengl32
 
+  # NOTE: the USE_CODEC_MP3 block earlier in the MinGW section adds libmad to
+  # CLIENT_LIBS, but the "CLIENT_LIBS = -lgdi32 -lole32" assignment above wipes
+  # it.  Re-add it here (after the reset) so mp3 audio actually links -- the EF
+  # SP voice-overs (sound/voice/.../*.mp3) are mp3 and are silent without it.
+  ifeq ($(USE_CODEC_MP3),1)
+    ifeq ($(ARCH),x64)
+      CLIENT_LIBS += $(LIBSDIR)/win64/libmad.a
+    else
+      CLIENT_LIBS += $(LIBSDIR)/win32/libmad.a
+    endif
+  endif
+
   ifeq ($(USE_FREETYPE),1)
     FREETYPE_CFLAGS = -Ifreetype2
   endif

@@ -351,6 +351,23 @@ S_RegisterSound
 Creates a default buzz sound if the file can't be loaded
 ==================
 */
+// Duration of a loaded sound in milliseconds (resampled length / mix rate).
+static int S_Base_SoundDuration( sfxHandle_t sfxHandle ) {
+	sfx_t *sfx;
+
+	if ( sfxHandle < 0 || sfxHandle >= s_numSfx || dma.speed <= 0 ) {
+		return 0;
+	}
+	sfx = &s_knownSfx[sfxHandle];
+	if ( sfx->inMemory == qfalse ) {
+		S_memoryLoad( sfx );
+	}
+	if ( sfx->soundLength <= 0 ) {
+		return 0;
+	}
+	return (int)( 1000.0 * (double)sfx->soundLength / (double)dma.speed );
+}
+
 sfxHandle_t	S_Base_RegisterSound( const char *name, qboolean compressed ) {
 	sfx_t	*sfx;
 
@@ -509,6 +526,17 @@ static qboolean S_Base_HearingThroughEntity( int entityNum, vec3_t origin )
 	else
 		VectorCopy(loopSounds[entityNum].origin, sorigin);
 
+#ifdef ELITEFORCE
+	// During an SP cinematic, scripted voice-over plays on the player entity (0)
+	// while the listener sits at the CGCam camera (far away) -- play it at full
+	// volume.  Test entityNum==0 directly rather than ==listener_number: early
+	// in the cinematic, before the cgame's first S_Respatialize, listener_number
+	// is uninitialized, so the first captain's-log line would otherwise be
+	// routed as a distant 3D sound and stay barely audible for its whole
+	// duration (volume is latched when the sound starts).
+	if ( entityNum == 0 && Cvar_VariableIntegerValue( "sv_sp_incamera" ) )
+		return qtrue;
+#endif
 	if( listener_number == entityNum )
 	{
 		// This is an outrageous hack to detect
@@ -1625,6 +1653,7 @@ qboolean S_Base_Init( soundInterface_t *si ) {
 	si->DisableSounds = S_Base_DisableSounds;
 	si->BeginRegistration = S_Base_BeginRegistration;
 	si->RegisterSound = S_Base_RegisterSound;
+	si->SoundDuration = S_Base_SoundDuration;
 	si->ClearSoundBuffer = S_Base_ClearSoundBuffer;
 	si->SoundInfo = S_Base_SoundInfo;
 	si->SoundList = S_Base_SoundList;

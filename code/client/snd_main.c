@@ -291,6 +291,15 @@ sfxHandle_t	S_RegisterSound( const char *sample, qboolean compressed )
 	}
 }
 
+int S_SoundDuration( sfxHandle_t sfx )
+{
+	if( si.SoundDuration ) {
+		return si.SoundDuration( sfx );
+	} else {
+		return 0;
+	}
+}
+
 /*
 =================
 S_ClearSoundBuffer

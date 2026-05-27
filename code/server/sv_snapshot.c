@@ -295,7 +295,15 @@ static void SV_AddEntToSnapshot( svEntity_t *svEnt, sharedEntity_t *gEnt, snapsh
 SV_AddEntitiesVisibleFromPoint
 ===============
 */
-static void SV_AddEntitiesVisibleFromPoint( vec3_t origin, clientSnapshot_t *frame, 
+#ifdef ELITEFORCE
+// Set per-snapshot from the sv_sp_incamera cvar (raised by the SP DLL's
+// CGCam_Enable).  When non-zero, SV_AddEntitiesVisibleFromPoint sends all
+// linked non-NOCLIENT entities, bypassing PVS/area culling, so an SP
+// cinematic camera can see entities outside the frozen player's PVS.
+static qboolean sv_sp_cineSendAll = qfalse;
+#endif
+
+static void SV_AddEntitiesVisibleFromPoint( vec3_t origin, clientSnapshot_t *frame,
 									snapshotEntityNumbers_t *eNums, qboolean portal ) {
 	int		e, i;
 	sharedEntity_t *ent;
@@ -373,6 +381,24 @@ static void SV_AddEntitiesVisibleFromPoint( vec3_t origin, clientSnapshot_t *fra
 			continue;
 		}
 
+#ifdef ELITEFORCE
+		// SP cinematic: the camera (CGCam) can look at parts of the map far
+		// outside the frozen player's PVS/area -- e.g. the borg1 intro shows
+		// painted billboards (70yearjourney, sevenspace, ...) that live in a
+		// sealed area the player's spawn alcove cannot see.  The server builds
+		// the snapshot from the PLAYER's viewpoint, so those entities would be
+		// PVS/area-culled and never reach the cgame, leaving the cinematic with
+		// an empty backdrop.  While a cinematic is active (flag set from the SP
+		// DLL's CGCam_Enable via the sv_sp_incamera cvar), bypass PVS/area
+		// culling and send every linked, non-NOCLIENT entity so the camera can
+		// see the whole composed scene.  Bounded by MAX_SNAPSHOT_ENTITIES and
+		// only active during the brief cinematic, so normal gameplay is
+		// unaffected (and MP never sets the cvar).
+		if ( sv_sp_cineSendAll ) {
+			SV_AddEntToSnapshot( svEnt, ent, eNums );
+			continue;
+		}
+#endif
 		// ignore if not touching a PV leaf
 		// check area
 		if ( !CM_AreasConnected( clientarea, svEnt->areanum ) ) {
@@ -491,19 +517,52 @@ static void SV_BuildClientSnapshot( client_t *client ) {
 
 	svEnt->snapshotCounter = sv.snapshotCounter;
 
-	// find the client's viewpoint
-	VectorCopy( ps->origin, org );
-	org[2] += ps->viewheight;
+#ifdef ELITEFORCE
+	// SP cinematic camera: build the snapshot from the CAMERA's viewpoint, not
+	// the frozen player's.  The camera (CGCam) can look at a sealed part of the
+	// map far from the player; using the camera origin for PVS sends exactly
+	// the entities the camera sees -- e.g. the borg1 intro billboards, which
+	// are co-located in the camera's room -- without the player's PVS culling
+	// them, and WITHOUT the old "send every linked entity" bypass that
+	// overflowed MAX_SNAPSHOT_ENTITIES (256) and silently dropped high-numbered
+	// scene entities like "enemyspace" (entity ~#1040).  The DLL publishes the
+	// live camera origin to sv_sp_cameraorigin from CGCam_Update.
+	sv_sp_cineSendAll = qfalse;
+	if ( Cvar_VariableIntegerValue( "sv_sp_incamera" ) != 0 ) {
+		const char *s = Cvar_VariableString( "sv_sp_cameraorigin" );
+		vec3_t camOrg = { 0, 0, 0 };
+		if ( s && s[0] &&
+		     sscanf( s, "%f %f %f", &camOrg[0], &camOrg[1], &camOrg[2] ) == 3 &&
+		     ( camOrg[0] || camOrg[1] || camOrg[2] ) ) {
+			// Build from the camera viewpoint with normal PVS/area culling.
+			VectorCopy( camOrg, org );
+			SV_AddEntitiesVisibleFromPoint( org, frame, &entityNumbers, qfalse );
+		} else {
+			// Camera origin not published yet (e.g. first cinematic frame):
+			// fall back to the old send-all bypass so the backdrop is never
+			// momentarily empty.
+			sv_sp_cineSendAll = qtrue;
+			VectorCopy( ps->origin, org );
+			org[2] += ps->viewheight;
+			SV_AddEntitiesVisibleFromPoint( org, frame, &entityNumbers, qfalse );
+		}
+	} else
+#endif
+	{
+		// find the client's viewpoint
+		VectorCopy( ps->origin, org );
+		org[2] += ps->viewheight;
 
-	// add all the entities directly visible to the eye, which
-	// may include portal entities that merge other viewpoints
-	SV_AddEntitiesVisibleFromPoint( org, frame, &entityNumbers, qfalse );
+		// add all the entities directly visible to the eye, which
+		// may include portal entities that merge other viewpoints
+		SV_AddEntitiesVisibleFromPoint( org, frame, &entityNumbers, qfalse );
+	}
 
 	// if there were portals visible, there may be out of order entities
 	// in the list which will need to be resorted for the delta compression
 	// to work correctly.  This also catches the error condition
 	// of an entity being included twice.
-	qsort( entityNumbers.snapshotEntities, entityNumbers.numSnapshotEntities, 
+	qsort( entityNumbers.snapshotEntities, entityNumbers.numSnapshotEntities,
 		sizeof( entityNumbers.snapshotEntities[0] ), SV_QsortEntityNumbers );
 
 	// now that all viewpoint's areabits have been OR'd together, invert

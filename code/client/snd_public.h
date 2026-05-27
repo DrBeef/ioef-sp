@@ -63,6 +63,10 @@ void S_BeginRegistration( void );
 // checks for missing files
 sfxHandle_t	S_RegisterSound( const char *sample, qboolean compressed );
 
+// Duration of a registered sound in milliseconds, for the active backend.
+// Returns 0 if unknown.  Used by the SP bridge for voice/caption timing.
+int S_SoundDuration( sfxHandle_t sfx );
+
 void S_DisplayFreeMemory(void);
 
 void S_ClearSoundBuffer( void );

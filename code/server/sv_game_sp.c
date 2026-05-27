@@ -612,6 +612,34 @@ static void SV_SP_SyncFromShared( sp_gentity_t *sp_ent ) {
 	// Preserve torsoAnimTimer, scale, pushVec -- all SP-only
 
 	sp_ent->linked = se->r.linked;
+	// Copy the brush-model flag back.  SV_SetBrushModel sets r.bmodel on the
+	// shadow entity, and SV_LinkEntity uses r.bmodel to decide s.solid: a
+	// bmodel gets s.solid = SOLID_BMODEL, otherwise it gets a packed box (or 0).
+	// Without copying this back, the SP entity's bmodel flag stayed false, so
+	// the next gi.linkentity re-derived s.solid = 0 for brush models -- and the
+	// cgame's CG_Mover only draws the inline brush (cgs.inlineDrawModel) when
+	// s.solid == SOLID_BMODEL, so func_usable billboards (e.g. the borg1 intro
+	// 70yearjourney/sevenspace paintings) silently rendered the wrong model.
+	sp_ent->bmodel = se->r.bmodel;
+	// Copy r.contents back for the same reason as r.bmodel above.
+	// SV_SetBrushModel sets r.contents = -1 ("everything", i.e. solid) on the
+	// shadow entity.  If we don't propagate it to the SP entity, the next
+	// gi.linkentity re-syncs the SP entity's stale contents (0) onto the
+	// shadow, so the engine's collision treats the brush model as non-solid --
+	// the player walks straight through brush-model func_usables that should
+	// block, e.g. the borg1 force fields that gate doorways until their
+	// distribution node is destroyed.  (The game still overrides contents=0
+	// for entities it deliberately disables, e.g. func_usable START_OFF.)
+	sp_ent->contents = se->r.contents;
+	// Copy the brush-model bounds back too (same root cause as bmodel/contents).
+	// SV_SetBrushModel sets r.mins/r.maxs from the inline model (CM_ModelBounds).
+	// Without copying them back, the SP entity kept its stale mins/maxs (~<-1..1>),
+	// so the next gi.linkentity linked the brush model as a tiny 2-unit box at the
+	// world origin instead of the real slab -- so collision missed it entirely
+	// (the borg1 force fields rendered/were visible but the player walked straight
+	// through them, because the collidable bounds weren't where the slab is).
+	VectorCopy( se->r.mins, sp_ent->mins );
+	VectorCopy( se->r.maxs, sp_ent->maxs );
 	VectorCopy( se->r.absmin, sp_ent->absmin );
 	VectorCopy( se->r.absmax, sp_ent->absmax );
 }
@@ -1551,11 +1579,34 @@ static qboolean SV_SP_LoadPendingSave( void ) {
 // pointers for all engine services.
 static sp_game_import_t	gi;
 
-// Dummy array for the S_Override pointer in sp_game_import_t.
-// The original EF1 engine exposed a sound override table here; ioEF
-// doesn't support this feature, but the SP game module reads/writes
-// the array during gameplay.  Providing a valid buffer prevents crashes.
-static int		s_override_dummy[256];
+// Backing array for the S_Override pointer in sp_game_import_t.
+// The original EF1 engine exposed a per-entity "voice sound playing" table
+// here: gi.S_Override[entnum] is non-zero while a scripted voice clip plays on
+// that entity, and the game's G_CheckTasksCompleted holds the ICARUS
+// TID_CHAN_VOICE task (e.g. the borg1 intro's per-VO waits) until it clears.
+// SV_SP_UpdateVoiceOverride() refreshes it each frame from the sound system's
+// actual playback state (see CL_SP_IsVoicePlaying).  Sized to SP_MAX_GENTITIES
+// because the game indexes it by entity number (was [256] -- a latent overflow,
+// since maps like borg1 use entity numbers well above 256).
+static int		s_override_dummy[SP_MAX_GENTITIES];
+
+// Refresh gi.S_Override from the sound backend's voice-playback state.  Must
+// run before ge->RunFrame so the game's task checks see current data.
+extern qboolean CL_SP_IsVoicePlaying( int entnum );
+static void SV_SP_UpdateVoiceOverride( void ) {
+	int i;
+	// During a cinematic skip (the use-holdable key ramps timescale up and sets
+	// skippingCinematic) don't hold voice-wait tasks -- let them complete at
+	// once so the skip fast-forwards instead of waiting real-time for the
+	// current voice line to finish.
+	if ( Cvar_VariableIntegerValue( "skippingCinematic" ) ) {
+		Com_Memset( s_override_dummy, 0, sizeof( s_override_dummy ) );
+		return;
+	}
+	for ( i = 0; i < SP_MAX_GENTITIES; i++ ) {
+		s_override_dummy[i] = CL_SP_IsVoicePlaying( i ) ? 1 : 0;
+	}
+}
 
 // ============================================================================
 // Wrapper functions for sp_game_import_t
@@ -2389,9 +2440,25 @@ void SV_SP_InitGameVM( void ) {
 		Com_Error( ERR_FATAL, "SV_SP_InitGameVM: game module not loaded" );
 	}
 
-	// Get the map name from the server info configstring
-	SV_GetConfigstring( CS_SERVERINFO, serverinfo, sizeof( serverinfo ) );
-	mapname = Info_ValueForKey( serverinfo, "mapname" );
+	// Get the map name.  IMPORTANT: read it from the "mapname" cvar, NOT
+	// from the CS_SERVERINFO configstring.  SV_SpawnServer sets the cvar
+	// (Cvar_Set("mapname", server)) BEFORE it calls SV_InitGameProgs, but it
+	// does not populate CS_SERVERINFO until AFTER game init.  Reading the
+	// configstring here therefore yielded an empty (or stale) map name, which
+	// the SP game then used to build script/precache paths -- e.g. the
+	// per-level dialogue precache became "real_scripts//behaved.pre" instead
+	// of "real_scripts/borg1/behaved.pre", so the cinematic scroll/caption
+	// text (@scrolling1, etc.) and other .pre-driven strings never loaded.
+	{
+		static char mapNameBuf[MAX_QPATH];
+		Q_strncpyz( mapNameBuf, Cvar_VariableString( "mapname" ), sizeof( mapNameBuf ) );
+		if ( !mapNameBuf[0] ) {
+			// Fallback: configstring (covers any path where the cvar is unset).
+			SV_GetConfigstring( CS_SERVERINFO, serverinfo, sizeof( serverinfo ) );
+			Q_strncpyz( mapNameBuf, Info_ValueForKey( serverinfo, "mapname" ), sizeof( mapNameBuf ) );
+		}
+		mapname = mapNameBuf;
+	}
 
 	// Get the entity string from the loaded BSP
 	entstring = CM_EntityString();
@@ -2579,6 +2646,10 @@ intptr_t QDECL SV_SP_GameVmMain( int command, ... ) {
 	case GAME_RUN_FRAME:
 		// Sync entities before the frame so traces during RunFrame see current data
 		SV_SP_SyncAllEntities();
+		// Refresh gi.S_Override so ICARUS voice-wait tasks (TID_CHAN_VOICE) see
+		// the real playback state -- otherwise scripted VO completes instantly
+		// and cinematics race (the borg1 intro collapsed from ~62s to ~36s).
+		SV_SP_UpdateVoiceOverride();
 		ge->RunFrame( arg0 );
 		// Sync again after the frame for snapshot building
 		SV_SP_SyncAllEntities();

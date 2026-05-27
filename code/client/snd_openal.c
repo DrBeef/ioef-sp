@@ -526,6 +526,18 @@ void S_AL_BufferShutdown( void )
 	alBuffersInitialised = qfalse;
 }
 
+// Duration of a loaded sound in milliseconds (sample count / sample rate).
+static int S_AL_SoundDuration( sfxHandle_t sfx )
+{
+	if ( sfx < 0 || sfx >= numSfx )
+		return 0;
+	if ( (!knownSfx[sfx].inMemory) && (!knownSfx[sfx].isDefault) )
+		S_AL_BufferLoad( sfx, qtrue );
+	if ( knownSfx[sfx].info.rate <= 0 )
+		return 0;
+	return (int)( 1000.0 * (double)knownSfx[sfx].info.samples / (double)knownSfx[sfx].info.rate );
+}
+
 /*
 =================
 S_AL_RegisterSound
@@ -706,6 +718,17 @@ static qboolean S_AL_HearingThroughEntity( int entityNum )
 {
 	float	distanceSq;
 
+#ifdef ELITEFORCE
+	// During an SP cinematic, scripted voice-over plays on the player entity (0)
+	// while the listener sits at the CGCam camera (far away) -- play it at full
+	// volume so the narration is audible.  Test entityNum==0 directly rather
+	// than ==lastListenerNumber: early in the cinematic, before the cgame's
+	// first S_Respatialize, lastListenerNumber is still -1, so the first
+	// captain's-log line would otherwise be routed as a distant 3D sound and
+	// stay barely audible for its whole duration (locality is latched at start).
+	if ( entityNum == 0 && Cvar_VariableIntegerValue( "sv_sp_incamera" ) )
+		return qtrue;
+#endif
 	if( lastListenerNumber == entityNum )
 	{
 		// This is an outrageous hack to detect
@@ -2726,6 +2749,7 @@ qboolean S_AL_Init( soundInterface_t *si )
 	si->DisableSounds = S_AL_DisableSounds;
 	si->BeginRegistration = S_AL_BeginRegistration;
 	si->RegisterSound = S_AL_RegisterSound;
+	si->SoundDuration = S_AL_SoundDuration;
 	si->ClearSoundBuffer = S_AL_ClearSoundBuffer;
 	si->SoundInfo = S_AL_SoundInfo;
 	si->SoundList = S_AL_SoundList;

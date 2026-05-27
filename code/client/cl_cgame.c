@@ -819,7 +819,18 @@ void CL_InitCGame( void ) {
 				}
 
 				clc.state = CA_LOADING;
-				VM_Call( cgvm, CG_INIT, clc.serverMessageSequence );
+				// The SP cgame's CG_Init(arg0) interprets arg0 as the
+				// serverCommandSequence baseline (cgs.serverCommandSequence).
+				// Pass lastExecutedServerCommand, NOT serverMessageSequence:
+				// serverMessageSequence is the snapshot message number and is
+				// unrelated to reliable server commands.  Using it made the
+				// cgame start its command sequence too high, so the first
+				// scripted server commands (e.g. the intro's "st" scroll text)
+				// were treated as already-executed and silently dropped.
+				// This mirrors the MP path below (and stock Q3's comment:
+				// "use the lastExecutedServerCommand ... otherwise server
+				// commands sent just before a gamestate are dropped").
+				VM_Call( cgvm, CG_INIT, clc.lastExecutedServerCommand );
 				Com_Printf( "SP cgame initialized from efgamex86.dll\n" );
 			} else {
 				Com_Error( ERR_DROP, "SP cgame: efgamex86.dll missing dllEntry/vmMain" );

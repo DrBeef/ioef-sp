@@ -99,22 +99,56 @@ static void CL_SP_SetFallbackLighting( vec_t *ambientLight, vec_t *directedLight
 }
 
 static intptr_t CL_SP_GetSampleLengthMilliseconds( sfxHandle_t sfxHandle ) {
-	sfx_t *sfx;
+	// Use the active sound backend's duration query.  The old code read the
+	// dma backend's s_knownSfx[] directly, which is empty when OpenAL is the
+	// active backend (the default) -- so this returned 0 and caption/voice
+	// timing was wrong under OpenAL.  S_SoundDuration dispatches to whichever
+	// backend is running.
+	return (intptr_t)S_SoundDuration( sfxHandle );
+}
 
-	if ( sfxHandle < 0 || sfxHandle >= s_numSfx || dma.speed <= 0 ) {
-		return 0;
+/*
+ * Voice-sound completion tracking for ICARUS (gi.S_Override).
+ *
+ * The SP game's G_CheckTasksCompleted holds a TID_CHAN_VOICE task until
+ * gi.S_Override[ent] reads false, i.e. until the entity's scripted voice clip
+ * finishes -- that is how the borg1 intro waits for each Janeway captain's-log
+ * line before advancing (billboards, fade, the cut to the 3D scene).  The
+ * engine's S_Override array was a never-updated dummy (always 0), so every
+ * voice line "completed" on the next frame and ICARUS raced through the whole
+ * VO-gated sequence (the ~62s intro collapsed to ~36s).
+ *
+ * Record each voice clip's wall-clock end time here when it starts; the server
+ * bridge (SV_SP_UpdateVoiceOverride) reflects "still playing" into
+ * gi.S_Override each game frame.
+ */
+static int s_spVoiceEndTime[ MAX_GENTITIES ];
+
+void CL_SP_ClearVoiceTracking( void ) {
+	Com_Memset( s_spVoiceEndTime, 0, sizeof( s_spVoiceEndTime ) );
+}
+
+qboolean CL_SP_IsVoicePlaying( int entnum ) {
+	if ( entnum < 0 || entnum >= MAX_GENTITIES ) {
+		return qfalse;
 	}
+	return ( Sys_Milliseconds() < s_spVoiceEndTime[ entnum ] ) ? qtrue : qfalse;
+}
 
-	sfx = &s_knownSfx[sfxHandle];
-	if ( sfx->inMemory == qfalse ) {
-		S_memoryLoad( sfx );
+// Note that a voice clip has begun on an entity so ICARUS can wait for it.
+// CHAN_VOICE (3) and CHAN_VOICE_ATTEN (4) are the SP voice channels.
+static void CL_SP_NoteVoiceSound( int entnum, int channel, sfxHandle_t sfx ) {
+	int ms;
+	if ( entnum < 0 || entnum >= MAX_GENTITIES ) {
+		return;
 	}
-
-	if ( sfx->soundLength <= 0 ) {
-		return 0;
+	if ( channel != 3 && channel != 4 ) {
+		return;
 	}
-
-	return ( (intptr_t)sfx->soundLength * 1000 ) / dma.speed;
+	ms = S_SoundDuration( sfx );
+	if ( ms > 0 ) {
+		s_spVoiceEndTime[ entnum ] = Sys_Milliseconds() + ms;
+	}
 }
 
 /*
@@ -365,6 +399,8 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 	// --- sound ---
 	case SPCG_S_STARTSOUND:
 		S_StartSound( VMA(1), args[2], args[3], args[4] );
+		// Track voice clips so ICARUS can wait for them to finish (gi.S_Override).
+		CL_SP_NoteVoiceSound( args[2], args[3], args[4] );
 		return 0;
 	case SPCG_S_STARTLOCALSOUND:
 		S_StartLocalSound( args[1], args[2] );

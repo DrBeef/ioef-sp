@@ -941,67 +941,38 @@ void SV_ShutdownGameProgs( void ) {
 ==================
 SV_SP_GameSystemCalls
 
-Syscall handler for the Elite Force SP game fake-VM (gvm).  Wraps the normal
-SV_GameSystemCalls but neutralises the force-feedback cgame traps that the
-single combined efgamex86.dll misroutes here.
+Syscall handler for the Elite Force SP game fake-VM (gvm).
 
-The DLL shares ONE syscall pointer between its server-game and client-cgame
-halves.  Cgame force-feedback traps (SPCG_FF_STARTFX..SPCG_FF_STOPALLFX ==
-34..37) fired from code shared with the server during ClientThink/RunFrame are
-dispatched through this game handler, where they collide with:
-  34 -> G_BOT_ALLOCATE_CLIENT
-  35 -> G_BOT_FREE_CLIENT      (Com_Error on a bad index)
-  36 -> G_GET_USERCMD          (writes a usercmd to a garbage pointer -> SIGSEGV)
-  37 -> G_GET_ENTITY_TOKEN     (Q_strncpyz on a garbage pointer -> SIGSEGV)
-SP never legitimately uses 34/35/36 (no bots; the usercmd is handed to
-ClientThink directly), and force feedback is a no-op in this engine, so we
-swallow 34-36 here.  #37 is also used for legitimate entity-string parsing,
-but ONLY at GAME_INIT (sv.entityParsePoint != NULL); outside that it is a
-misrouted FF trap, so let it through only while parsing.
+The combined efgamex86.dll shares ONE numbered-syscall pointer between its two
+halves, but only the CGAME half actually uses it: the SERVER-GAME half talks to
+the engine exclusively through the gi.* function-pointer table (and parses the
+entity string -- passed to ge->Init -- locally with COM_Parse).  It never makes
+a numbered syscall of its own.
+
+So every numbered syscall that reaches this handler comes from code SHARED with
+the cgame (bg_pmove.c, g_utils.c, NPC_*.c, effects, model/sound registration,
+...) calling a cgame trap wrapper (cgi_*) while it happens to be running in
+server context (currentVM==gvm).  Those are CGAME trap numbers, and the cgame
+and game use DIFFERENT numbering schemes, so dispatching them through the GAME
+handler (SV_GameSystemCalls) misinterprets the number and crashes -- e.g.:
+  cgame S_StartSound  (26) -> game G_IN_PVS              -> CM_PointLeafnum(garbage)
+  cgame R_RegisterModel(39) -> game G_DEBUG_POLYGON_CREATE -> memcpy(garbage)
+  cgame FF_StopAllFX  (37) -> game G_GET_ENTITY_TOKEN    -> strncpy(garbage)
+These can't be fixed by renumbering: the game handler doesn't IMPLEMENT the
+renderer/sound/CM services at all, so there's nothing to align to.
+
+The correct fix is simply to dispatch these numbered calls through the handler
+that DOES understand the numbers -- the cgame handler -- which services them for
+real (CM queries, sound playback, model/skin/shader registration, FF no-ops,
+...).  That gives shared code the real results it needs during spawn/think and
+removes the whole class of misroute crashes.  (An earlier attempt bound a no-op
+STUB on the shared syscall pointer instead; that broke loading because legit
+shared cgi_* calls returned 0.  Routing to the real cgame handler does not have
+that problem.)  MP is unaffected -- it uses SV_GameSystemCalls directly.
 */
 intptr_t SV_SP_GameSystemCalls( intptr_t *args ) {
-	switch ( args[0] ) {
-	case G_BOT_ALLOCATE_CLIENT:		// SPCG_FF_STARTFX
-	case G_BOT_FREE_CLIENT:			// SPCG_FF_ENSUREFX
-	case G_GET_USERCMD:				// SPCG_FF_STOPFX
-		return 0;
-	case G_GET_ENTITY_TOKEN:		// SPCG_FF_STOPALLFX, or a real entity token at GAME_INIT
-		if ( !sv.entityParsePoint ) {
-			return 0;
-		}
-		break;
-
-	/*
-	 * Pointer-argument sanity guards for the misrouted-cgame-trap problem.
-	 *
-	 * Shared game/cgame code in efgamex86.dll calls CGAME trap numbers through
-	 * the DLL's shared syscall pointer during server-side ClientThink/RunFrame.
-	 * With currentVM==gvm those get dispatched HERE as game syscalls with the
-	 * cgame trap's (mismatched) arguments -- typically a garbage pointer such as
-	 * 0x3fe where a vec3_t* is expected -- which crashes on dereference (seen:
-	 * cgame trap #26 -> G_IN_PVS -> CM_PointLeafnum(0x3fe) -> SIGSEGV).
-	 *
-	 * A real game-side call always passes valid pointers, so reject implausibly
-	 * small pointer values (the bottom 64KB is never a valid user-space address)
-	 * and no-op the call.  This is behaviour-neutral for legitimate callers and
-	 * for MP (MP uses SV_GameSystemCalls directly, not this wrapper).
-	 */
-	case G_IN_PVS:
-	case G_IN_PVS_IGNORE_PORTALS:	// ( const vec3_t p1, const vec3_t p2 )
-		if ( (uintptr_t)args[1] < 0x10000u || (uintptr_t)args[2] < 0x10000u ) {
-			return qfalse;
-		}
-		break;
-	case G_POINT_CONTENTS:			// ( const vec3_t point, int passEntityNum )
-		if ( (uintptr_t)args[1] < 0x10000u ) {
-			return 0;
-		}
-		break;
-
-	default:
-		break;
-	}
-	return SV_GameSystemCalls( args );
+	extern intptr_t CL_SPCgameSystemCalls( intptr_t *args );
+	return CL_SPCgameSystemCalls( args );
 }
 
 /*
