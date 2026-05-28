@@ -24,6 +24,10 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "q_shared.h"
 #include "qcommon.h"
 #include <setjmp.h>
+
+#ifdef BUILD_VR
+#include "../vr/VrBase.h"
+#endif
 #ifndef _WIN32
 #include <netinet/in.h>
 #include <sys/stat.h> // umask
@@ -3166,7 +3170,17 @@ void Com_Frame( void ) {
 	int		timeBeforeEvents;
 	int		timeBeforeClient;
 	int		timeAfter;
-  
+
+#ifdef BUILD_VR
+	// Sample the HMD pose (and begin the OpenXR frame) at the very TOP of the
+	// frame -- before the client builds its usercmd in CL_SendCmd -- so head yaw
+	// fed into the usercmd is fresh (no extra frame of latency).  Matches
+	// RealRTCWXR (Com_Frame).  The later TBXR_FrameSetup() in SCR_UpdateScreen is
+	// a no-op this frame (guarded by gAppState.FrameSetup; reset in submitFrame).
+	if ( VR_IsActive() ) {
+		TBXR_FrameSetup();
+	}
+#endif
 
 	if ( setjmp (abortframe) ) {
 		return;			// an ERR_DROP was thrown

@@ -23,6 +23,10 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "client.h"
 
+#ifdef BUILD_VR
+#include "../vr/VrBase.h"
+#endif
+
 unsigned	frame_msec;
 int			old_com_frameTime;
 
@@ -559,6 +563,44 @@ void CL_FinishMove( usercmd_t *cmd ) {
 	// send the current server time so the amount of movement
 	// can be determined without allowing cheating
 	cmd->serverTime = cl.serverTime;
+
+#ifdef BUILD_VR
+	// Head-aim (M1, pre-controller): drive the view from the HMD so the gun fires
+	// where you look.  YAW is applied INCREMENTALLY (the per-frame change in HMD
+	// yaw) so it composes with mouse turning AND preserves the server's spawn
+	// view baseline (delta_angles) -- overwriting with the absolute HMD yaw both
+	// killed mouse turning and ignored delta_angles (firing offset from the view).
+	// PITCH is taken absolutely from the HMD.  The resulting cl.viewangles flow
+	// through the usercmd to ps.viewangles, and the cgame renders ps.viewangles,
+	// so view and aim stay identical.  Replaced by motion-controller aim in M2.
+	if ( VR_IsActive() ) {
+		static float    s_lastHmdYaw = 0.0f;
+		static qboolean s_haveHmd    = qfalse;
+		float           hmdYaw = vr.hmdorientation[YAW];
+
+		// YAW: apply the per-frame HMD yaw CHANGE so it composes with mouse
+		// turning and preserves the server's spawn view baseline (delta_angles).
+		if ( s_haveHmd ) {
+			float dYaw = hmdYaw - s_lastHmdYaw;
+			while ( dYaw >  180.0f ) dYaw -= 360.0f;
+			while ( dYaw < -180.0f ) dYaw += 360.0f;
+			cl.viewangles[YAW] += dYaw;
+		}
+		s_lastHmdYaw = hmdYaw;
+		s_haveHmd    = qtrue;
+
+		// PITCH: absolute from the HMD -- aim pitch is ENTIRELY head-controlled.
+		// The mouse must NOT influence it (else you look forward but shoot at the
+		// floor).  This overwrites any mouse pitch accumulated above.
+		cl.viewangles[PITCH] = vr.hmdorientation[PITCH];
+
+		// Publish the LIVE client view angles for the cgame so it can render the
+		// head yaw fresh as (clientviewangles[YAW] + delta_angles[YAW]) -- equal
+		// to ps.viewangles but without the snapshot/prediction lag that made yaw
+		// feel laggy.  (RealRTCWXR model.)
+		VectorCopy( cl.viewangles, vr.clientviewangles );
+	}
+#endif
 
 	for (i=0 ; i<3 ; i++) {
 		cmd->angles[i] = ANGLE2SHORT(cl.viewangles[i]);
