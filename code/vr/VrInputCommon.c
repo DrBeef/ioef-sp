@@ -26,6 +26,23 @@ vr_client_info_t vr;
 
 extern ovrApp gAppState;
 
+/* ----------------------------------------------------------------------------
+   Controller state globals (filled by OpenXrInput.c TBXR_UpdateControllers,
+   consumed by EFXR_SurfaceView.c VR_HandleControllerInput).  Ported from
+   RealRTCWXR VrInputCommon.c.
+   ---------------------------------------------------------------------------- */
+ovrInputStateTrackedRemote leftTrackedRemoteState_old;
+ovrInputStateTrackedRemote leftTrackedRemoteState_new;
+ovrTrackedController        leftRemoteTracking_new;
+ovrInputStateTrackedRemote rightTrackedRemoteState_old;
+ovrInputStateTrackedRemote rightTrackedRemoteState_new;
+ovrTrackedController        rightRemoteTracking_new;
+
+/* Per-frame movement/turn outputs that the engine (cl_input.c) reads via the
+   VR_GetControllerMove / VR_GetTurnDelta getters in EFXR_SurfaceView.c. */
+float remote_movementSideways;
+float remote_movementForward;
+
 
 void rotateAboutOrigin(float x, float y, float rotation, vec2_t out)
 {

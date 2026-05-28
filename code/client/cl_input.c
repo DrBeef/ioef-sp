@@ -594,6 +594,11 @@ void CL_FinishMove( usercmd_t *cmd ) {
 		// floor).  This overwrites any mouse pitch accumulated above.
 		cl.viewangles[PITCH] = vr.hmdorientation[PITCH];
 
+		// Thumbstick turn (snap or smooth): apply the per-frame yaw delta from the
+		// VR layer INCREMENTALLY, exactly like the HMD yaw above, so it composes
+		// with both the HMD turn and mouse turning and preserves delta_angles.
+		cl.viewangles[YAW] += VR_GetTurnDelta();
+
 		// Publish the LIVE client view angles for the cgame so it can render the
 		// head yaw fresh as (clientviewangles[YAW] + delta_angles[YAW]) -- equal
 		// to ps.viewangles but without the snapshot/prediction lag that made yaw
@@ -605,6 +610,40 @@ void CL_FinishMove( usercmd_t *cmd ) {
 	for (i=0 ; i<3 ; i++) {
 		cmd->angles[i] = ANGLE2SHORT(cl.viewangles[i]);
 	}
+
+#ifdef BUILD_VR
+	// 6DoF horizontal: physically leaning/stepping drives player movement so the
+	// body follows the head (with collision), RealRTCWXR-style.  Added on top of
+	// any keyboard/stick movement already in the cmd.  The motion-controller
+	// thumbstick movement, jump/crouch (upmove) and shoot/use buttons are layered
+	// in here too (the VR layer computed them in VR_HandleControllerInput).
+	if ( VR_IsActive() ) {
+		float vrForward = 0.0f, vrSide = 0.0f;
+		float ctlForward = 0.0f, ctlSide = 0.0f;
+		int   ctlUpMove, ctlButtons;
+
+		VR_GetPositionalMove( &vrForward, &vrSide );
+		VR_GetControllerMove( &ctlForward, &ctlSide );
+
+		cmd->forwardmove = ClampChar( cmd->forwardmove
+			+ (int)( vrForward  * 127.0f )
+			+ (int)( ctlForward * 127.0f ) );
+		cmd->rightmove   = ClampChar( cmd->rightmove
+			+ (int)( vrSide  * 127.0f )
+			+ (int)( ctlSide * 127.0f ) );
+
+		// Jump / crouch from controller (only override when set, so the keyboard
+		// upmove still works when no VR button is pressed).
+		ctlUpMove = VR_GetControllerUpMove();
+		if ( ctlUpMove != 0 ) {
+			cmd->upmove = ClampChar( ctlUpMove );
+		}
+
+		// Shoot / use button bits.
+		ctlButtons = VR_GetControllerButtons();
+		cmd->buttons |= ctlButtons;
+	}
+#endif
 }
 
 

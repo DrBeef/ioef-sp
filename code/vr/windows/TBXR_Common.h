@@ -61,11 +61,12 @@ void GlInitExtensions();
 
 #define ALOGE(...) Com_Printf(__VA_ARGS__)
 
-#if DEBUG
+// Enabled in ALL builds for VR diagnostics.  These sites are event-driven
+// (session-state changes, reference-space recenter, swapchain-wait timeouts,
+// OpenXR errors) -- NOT per-frame -- so they don't spam normal play, but they
+// surface the cause of hangs/lockups in the release build the user runs.  Was
+// #if DEBUG (silent in release).
 #define ALOGV(...) Com_Printf(__VA_ARGS__)
-#else
-#define ALOGV(...)
-#endif
 
 
 enum { ovrMaxLayerCount = 3 };
@@ -161,8 +162,9 @@ typedef struct
 // Forward declarations
 XrInstance TBXR_GetXrInstance();
 
-#if defined(DEBUG)
-static void
+// Compiled in ALL builds (was #if DEBUG).  The check is cheap -- it only formats
+// a message when XR_FAILED -- and it does NOT abort despite the failOnError name.
+__attribute__((unused)) static void
 OXR_CheckErrors(XrInstance instance, XrResult result, const char* function, bool failOnError) {
     if (XR_FAILED(result)) {
         char errorBuffer[XR_MAX_RESULT_STRING_SIZE];
@@ -174,13 +176,12 @@ OXR_CheckErrors(XrInstance instance, XrResult result, const char* function, bool
         }
     }
 }
-#endif
 
-#if defined(DEBUG)
+// Always check + LOG OpenXR call results.  Previously release builds ran every
+// XR call unchecked, so a failing xrWaitFrame/xrAcquireSwapchainImage/xrEndFrame
+// right before a hang was completely invisible -- the main reason VR lockups
+// were untrackable.
 #define OXR(func) OXR_CheckErrors(TBXR_GetXrInstance(), func, #func, true);
-#else
-#define OXR(func) func;
-#endif
 
 
 typedef struct
@@ -278,6 +279,9 @@ void TBXR_LeaveVR();
 void TBXR_EnterVR();
 void TBXR_GetScreenRes(int *width, int *height);
 void TBXR_InitActions( void );
+void TBXR_DestroyActions( void );
+void TBXR_DestroySessionForReinit( void );
+void *TBXR_GetCurrentGLContext( void );
 void TBXR_Vibrate(int duration, int channel, float intensity );
 void TBXR_ProcessHaptics();
 void TBXR_FrameSetup();

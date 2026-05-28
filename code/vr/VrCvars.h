@@ -18,11 +18,16 @@ be reinstated alongside the input layer in a later milestone.
 
 extern cvar_t	*vr_worldscale;
 extern cvar_t	*vr_heightAdjust;
+extern cvar_t	*vr_height_offset;
+extern cvar_t	*vr_positional_factor;
 extern cvar_t	*vr_screen_dist;
 extern cvar_t	*vr_immersive_cinematics;
 extern cvar_t	*vr_control_scheme;
 extern cvar_t	*vr_haptic_intensity;
 extern cvar_t	*vr_refresh;
+extern cvar_t	*vr_turn_mode;
+extern cvar_t	*vr_turn_angle;
+extern cvar_t	*vr_switch_sticks;
 
 void VR_InitCvars(void);
 

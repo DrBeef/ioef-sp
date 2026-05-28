@@ -822,6 +822,46 @@ void TBXR_LeaveVR( ) {
 	ovrApp_Clear(&gAppState);
 }
 
+// Returns the current OpenGL context handle (so the VR layer can detect when the
+// engine recreated the GL context via a renderer restart).
+void *TBXR_GetCurrentGLContext( void )
+{
+	return (void *)wglGetCurrentContext();
+}
+
+// Tear down ONLY the GL-context-dependent OpenXR objects -- session, reference
+// spaces, eye/null swapchains+framebuffers, action set -- while KEEPING the
+// instance/system (which don't depend on GL and were created in
+// VR_PreRendererInit).  The session is bound to the GL context at creation
+// (xrCreateSession with the HGLRC), so when the engine destroys/recreates the GL
+// context during its startup renderer restarts, the session and its swapchains
+// become invalid and xrAcquireSwapchainImage fails with XR_ERROR_RUNTIME_FAILURE
+// (hang).  This lets VR_Init rebuild them against the new context.  Some of these
+// destroy calls may log a benign OpenXR error for objects whose GL context is
+// already gone -- that's expected and non-fatal.
+void TBXR_DestroySessionForReinit( void )
+{
+	TBXR_DestroyActions();
+
+	if (gAppState.Session != XR_NULL_HANDLE) {
+		if (gAppState.ViewSpace  != XR_NULL_HANDLE) { OXR(xrDestroySpace(gAppState.ViewSpace));  gAppState.ViewSpace  = XR_NULL_HANDLE; }
+		if (gAppState.LocalSpace != XR_NULL_HANDLE) { OXR(xrDestroySpace(gAppState.LocalSpace)); gAppState.LocalSpace = XR_NULL_HANDLE; }
+		if (gAppState.StageSpace != XR_NULL_HANDLE) { OXR(xrDestroySpace(gAppState.StageSpace)); gAppState.StageSpace = XR_NULL_HANDLE; }
+		OXR(xrDestroySession(gAppState.Session));
+		gAppState.Session = XR_NULL_HANDLE;
+	}
+	gAppState.SessionActive = GL_FALSE;
+	gAppState.FrameSetup = false;
+
+	ovrRenderer_Destroy( &gAppState.Renderer );
+	ovrFramebuffer_Destroy( &gAppState.Renderer.NullFrameBuffer );
+
+	if (gAppState.Views != NULL) {
+		free(gAppState.Views);
+		gAppState.Views = NULL;
+	}
+}
+
 void TBXR_InitRenderer(  ) {
 	// Get the viewport configuration info for the chosen viewport configuration type.
 	gAppState.ViewportConfig.type = XR_TYPE_VIEW_CONFIGURATION_PROPERTIES;
@@ -1255,19 +1295,12 @@ void TBXR_submitFrame()
 /*
 ================================================================================
 
-Controller / haptics -- stubbed for M1 (RealRTCW implements these in
-OpenXrInput.c, which is not ported yet).  Provided here so the layer links.
+Haptics -- stubbed (RealRTCW implements these in OpenXrInput.c; we leave them
+no-op per the focused input scope).  TBXR_InitActions / TBXR_UpdateControllers
+now live in OpenXrInput.c.
 
 ================================================================================
 */
-
-void TBXR_InitActions( void )
-{
-}
-
-void TBXR_UpdateControllers( )
-{
-}
 
 void TBXR_Vibrate( int duration, int chan, float intensity )
 {

@@ -25,6 +25,18 @@ helpers actually defined in VrInputCommon.c are declared here.
 extern long long global_time;
 extern int ducked;
 
+/* Controller state globals (defined in VrInputCommon.c, filled by
+   OpenXrInput.c, consumed by EFXR_SurfaceView.c). */
+extern ovrInputStateTrackedRemote leftTrackedRemoteState_old;
+extern ovrInputStateTrackedRemote leftTrackedRemoteState_new;
+extern ovrTrackedController        leftRemoteTracking_new;
+extern ovrInputStateTrackedRemote rightTrackedRemoteState_old;
+extern ovrInputStateTrackedRemote rightTrackedRemoteState_new;
+extern ovrTrackedController        rightRemoteTracking_new;
+
+extern float remote_movementSideways;
+extern float remote_movementForward;
+
 float length(float x, float y);
 float nonLinearFilter(float in);
 bool between(float min, float val, float max);

@@ -163,6 +163,10 @@ IMPLEMENTATION SPECIFIC FUNCTIONS
 void		GLimp_Init( void );
 void		GLimp_Shutdown( void );
 void		GLimp_EndFrame( void );
+#ifdef BUILD_VR
+void		GLimp_SwapWindow( void );	// VR desktop-mirror present (re.WIN_SwapWindow)
+void		GLimp_GetDrawableSize( int *w, int *h );	// actual window pixel size (re.WIN_GetDrawableSize)
+#endif
 
 void		GLimp_LogComment( char *comment );
 void		GLimp_Minimize(void);

@@ -227,6 +227,7 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder)
 	SDL_DisplayMode desktopMode;
 	int display = 0;
 	int x = SDL_WINDOWPOS_UNDEFINED, y = SDL_WINDOWPOS_UNDEFINED;
+	int winW = 0, winH = 0;	// desktop window size (may be capped below glConfig in VR)
 
 	ri.Printf( PRINT_ALL, "Initializing OpenGL display\n");
 
@@ -299,11 +300,38 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder)
 	}
 	ri.Printf( PRINT_ALL, " %d %d\n", glConfig.vidWidth, glConfig.vidHeight);
 
+	// The desktop window size starts equal to the render resolution...
+	winW = glConfig.vidWidth;
+	winH = glConfig.vidHeight;
+
+	// ...but in VR the render resolution is the per-eye texture size, which is
+	// normally LARGER than the desktop (e.g. 2275x2433 vs a 1707x1067 screen).
+	// glConfig MUST stay at that size -- the GL1 pipeline and the per-eye XR
+	// swapchain FBOs all render at it, so the headset stays full-res.  But the
+	// desktop window can't be that big: forcing it made the engine fail to match a
+	// window mode and thrash/restart the renderer, which destroyed the GL context
+	// the OpenXR session was bound to (headset went blank).  So cap ONLY the
+	// desktop mirror window to fit the screen; the eyes are unaffected (separate
+	// swapchains).  Mirrors how RealRTCWXR/JKXR keep a normal window + full-res
+	// eye textures.  (Triggers only when the request exceeds the desktop, i.e. VR
+	// -- flat modes are always <= desktop, so this is a no-op there.)
+	if( !fullscreen && desktopMode.h > 0 &&
+	    ( winW > desktopMode.w || winH > desktopMode.h ) )
+	{
+		float sw = (float)desktopMode.w / (float)winW;
+		float sh = (float)desktopMode.h / (float)winH;
+		float s  = ( sw < sh ? sw : sh ) * 0.9f;	// 0.9 leaves room for the title bar
+		winW = (int)( winW * s );
+		winH = (int)( winH * s );
+		ri.Printf( PRINT_ALL, "Render res %dx%d exceeds desktop %dx%d -- mirror window capped to %dx%d\n",
+		           glConfig.vidWidth, glConfig.vidHeight, desktopMode.w, desktopMode.h, winW, winH );
+	}
+
 	// Center window
 	if( r_centerWindow->integer && !fullscreen )
 	{
-		x = ( desktopMode.w / 2 ) - ( glConfig.vidWidth / 2 );
-		y = ( desktopMode.h / 2 ) - ( glConfig.vidHeight / 2 );
+		x = ( desktopMode.w / 2 ) - ( winW / 2 );
+		y = ( desktopMode.h / 2 ) - ( winH / 2 );
 	}
 
 	// Destroy existing state if it exists
@@ -446,7 +474,7 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder)
 #endif
 
 		if( ( SDL_window = SDL_CreateWindow( CLIENT_WINDOW_TITLE, x, y,
-				glConfig.vidWidth, glConfig.vidHeight, flags ) ) == NULL )
+				winW, winH, flags ) ) == NULL )
 		{
 			ri.Printf( PRINT_DEVELOPER, "SDL_CreateWindow failed: %s\n", SDL_GetError( ) );
 			continue;
@@ -880,3 +908,43 @@ void GLimp_EndFrame( void )
 		r_fullscreen->modified = qfalse;
 	}
 }
+
+#ifdef BUILD_VR
+/*
+===============
+GLimp_SwapWindow
+
+Present the desktop window (the VR desktop mirror).  GLimp_EndFrame suppresses
+the normal swap while VR is active (the XR compositor presents the eye buffers);
+the VR layer calls this -- via re.WIN_SwapWindow -- after blitting an eye into
+the window's default framebuffer.  Mirrors RealRTCWXR's WIN_SwapWindow.
+===============
+*/
+void GLimp_SwapWindow( void )
+{
+	SDL_GL_SwapWindow( SDL_window );
+}
+
+/*
+===============
+GLimp_GetDrawableSize
+
+The actual desktop window drawable size in pixels (which, in VR, is smaller than
+the per-eye render resolution -- the window is capped to fit the screen).  The VR
+layer uses this as the mirror-blit destination so the eye scales to fill the
+window instead of being cropped.
+===============
+*/
+void GLimp_GetDrawableSize( int *w, int *h )
+{
+	if ( SDL_window )
+	{
+		SDL_GL_GetDrawableSize( SDL_window, w, h );
+	}
+	else
+	{
+		*w = glConfig.vidWidth;
+		*h = glConfig.vidHeight;
+	}
+}
+#endif

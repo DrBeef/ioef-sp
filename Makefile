@@ -1725,6 +1725,7 @@ ifeq ($(HAVE_VR),1)
     $(B)/client/VrInputCommon.o \
     $(B)/client/VrCvars.o \
     $(B)/client/TBXR_Common.o \
+    $(B)/client/OpenXrInput.o \
     $(B)/client/EFXR_SurfaceView.o
 endif
 

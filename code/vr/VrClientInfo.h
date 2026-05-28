@@ -58,6 +58,10 @@ typedef struct {
     float       off_center_fov_x[2];    /* per-eye asymmetric FOV centre offset */
     float       off_center_fov_y[2];
 
+    /* ---- 6DoF scale config (engine caches these from cvars each frame) ---- */
+    float       worldscale;             /* Quake units per real-world metre (vr_worldscale) */
+    float       height_offset;          /* extra eye height in metres, for seated play (vr_height_offset) */
+
     /* ---- comfort / control configuration (cached from cvars) ---- */
     qboolean    right_handed;
     qboolean    menu_right_handed;

@@ -102,6 +102,20 @@ typedef struct {
 	qboolean (*inPVS)( const vec3_t p1, const vec3_t p2 );
 
 	void (*TakeVideoFrame)( int h, int w, byte* captureBuffer, byte *encodeBuffer, qboolean motionJpeg );
+
+#ifdef BUILD_VR
+	// Present the desktop window (SDL_GL_SwapWindow).  In VR, GLimp_EndFrame
+	// suppresses the normal swap (the XR compositor presents the eye buffers);
+	// the VR layer calls this after blitting an eye to the window so the desktop
+	// mirror updates.  Mirrors RealRTCWXR's re.WIN_SwapWindow.
+	void (*WIN_SwapWindow)( void );
+
+	// Actual desktop window drawable size in pixels.  In VR the render resolution
+	// (glConfig.vidWidth/Height) is the per-eye texture size, which is larger than
+	// the (capped) desktop window, so the VR layer needs the real window size to
+	// scale the mirror blit to fit instead of cropping it.
+	void (*WIN_GetDrawableSize)( int *w, int *h );
+#endif
 } refexport_t;
 
 //

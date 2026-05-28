@@ -591,6 +591,23 @@ void SCR_UpdateScreen( void ) {
 	// that case.
 	if( uivm || com_dedicated->integer )
 	{
+		// Cinematic skip (applies in BOTH VR and flat).  When the player hits the
+		// skip button during a scripted cutscene the SP game fast-forwards via
+		// timescale 100 (skippingCinematic=1) and runs the ICARUS script to its
+		// natural end.  Rather than draw the racing cutscene, present a cheap black
+		// frame: that reads as an immediate cut, and (in VR) keeps frames cheap so
+		// the headset stays at full refresh and the fast-forward isn't throttled by
+		// xrWaitFrame pacing.  The game DLL drives ICARUS to the end independently of
+		// rendering, so not drawing the scene for those few frames is safe.  Kill the
+		// audio once on the skip edge so the real-time VO stops dead.
+		qboolean skippingCin = Cvar_VariableIntegerValue( "skippingCinematic" ) != 0;
+		{
+			static qboolean wasSkippingCin = qfalse;
+			if ( skippingCin && !wasSkippingCin ) {
+				S_StopAllSounds();
+			}
+			wasSkippingCin = skippingCin;
+		}
 #ifdef BUILD_VR
 		if ( VR_IsActive() )
 		{
@@ -605,7 +622,14 @@ void SCR_UpdateScreen( void ) {
 			if ( VR_UseScreenLayer() )
 			{
 				TBXR_prepareEyeBuffer( 0 );
-				SCR_DrawScreenField( STEREO_CENTER );
+				if ( skippingCin ) {
+					// Cheap black frame -- skip the expensive cgame cinematic draw
+					// (see the skip note at the top of this block).
+					re.BeginFrame( STEREO_CENTER );
+					SCR_FillRect( 0, 0, 640, 480, colorBlack );
+				} else {
+					SCR_DrawScreenField( STEREO_CENTER );
+				}
 				re.EndFrame( NULL, NULL );
 				TBXR_finishEyeBuffer( 0 );
 			}
@@ -636,8 +660,14 @@ void SCR_UpdateScreen( void ) {
 
 		// XXX
 		int in_anaglyphMode = Cvar_VariableIntegerValue("r_anaglyphMode");
-		// if running in stereo, we need to draw the frame twice
-		if ( cls.glconfig.stereoEnabled || in_anaglyphMode) {
+		if ( skippingCin ) {
+			// Skipping a cutscene: cheap black frame instead of the racing
+			// cinematic (see note at the top of this block).  Flat Com_Frame is
+			// uncapped, so the timescale-100 fast-forward finishes near-instantly.
+			re.BeginFrame( STEREO_CENTER );
+			SCR_FillRect( 0, 0, 640, 480, colorBlack );
+		} else if ( cls.glconfig.stereoEnabled || in_anaglyphMode) {
+			// if running in stereo, we need to draw the frame twice
 			SCR_DrawScreenField( STEREO_LEFT );
 			SCR_DrawScreenField( STEREO_RIGHT );
 		} else {

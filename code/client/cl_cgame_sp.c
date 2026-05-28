@@ -499,6 +499,8 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 			refdef_t *fd = (refdef_t *)VMA(1);
 			float sep = VR_GetEyeStereoSeparation( vr.eye );
 			VectorMA( fd->vieworg, sep, fd->viewaxis[1], fd->vieworg );
+			// (6DoF vertical view height is applied in the cgame, floor-relative,
+			//  so it can use the player's feet position.)
 		}
 #endif
 		re.RenderScene( VMA(1) );
@@ -631,11 +633,31 @@ intptr_t CL_SPCgameSystemCalls( intptr_t *args ) {
 		spSnap->serverTime = tempSnap.serverTime;
 		Com_Memcpy( spSnap->areamask, tempSnap.areamask, sizeof( spSnap->areamask ) );
 
-		/* SP-specific fields: cmdNum and configstring tracking.
-		   We set these to 0 because the ioEF engine doesn't track them.
-		   The SP cgame appears to tolerate zero values here -- it falls back
-		   to other mechanisms for command prediction and configstring updates. */
-		spSnap->cmdNum = 0;
+		/* cmdNum = the last usercmd the server has already executed for this
+		   snapshot, i.e. the command baked into spSnap->ps.  CG_PredictPlayerState
+		   (cg_predict.cpp) replays the unacknowledged commands AFTER it, up to the
+		   current command, to produce smooth render-rate motion.
+
+		   We find it the same way stock Q3/EF does: the most recent usercmd whose
+		   serverTime is at or before the snapshot's serverTime (client and server
+		   share one clock in SP).  This MUST be a real, recent value -- it was
+		   previously hardcoded 0, but CL_GetCurrentCmdNumber() climbs forever, so
+		   `current - 0` exceeded CMD_BACKUP after ~64 commands and prediction
+		   permanently bailed (CG_PredictPlayerState:415), freezing the view while
+		   the server kept running. */
+		{
+			int current = CL_GetCurrentCmdNumber();
+			int cmdNum  = current;
+			int limit   = current - CMD_BACKUP + 1;	/* oldest cmd still in the ring */
+			usercmd_t c;
+			while ( cmdNum > limit && CL_GetUserCmd( cmdNum, &c ) &&
+					c.serverTime > tempSnap.serverTime ) {
+				cmdNum--;
+			}
+			spSnap->cmdNum = cmdNum;
+		}
+		/* Configstring/server-command change tracking is unused by the SP cgame
+		   here -- it falls back to its own mechanisms, so zero is fine. */
 		spSnap->serverCommandSequence = tempSnap.serverCommandSequence;
 		spSnap->numServerCommands = 0;
 		spSnap->numConfigstringChanges = 0;

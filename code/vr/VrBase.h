@@ -39,6 +39,23 @@ qboolean VR_GetFovTangents( float *tanLeft, float *tanRight, float *tanUp, float
    OpenXR eye poses * vr_worldscale.  Apply along refdef viewaxis[1]. */
 float    VR_GetEyeStereoSeparation( int eye );
 
+/* 6DoF positional head tracking.  VERTICAL: view-origin Z offset (Quake units)
+   for physical duck/stand -- add to refdef.vieworg[2].  HORIZONTAL: physical
+   lean/step -> player movement (RealRTCWXR-style) -- forward/side outputs scaled
+   by 127 into the usercmd. */
+float    VR_GetHeightOffset( void );
+void     VR_GetPositionalMove( float *forward, float *side );
+
+/* ---- motion-controller input (injected by cl_input.c CL_FinishMove) ----
+   Movement: thumbstick forward/side (-1..1-ish), engine scales by 127.
+   Buttons:  OR of the EF usercmd button bits (BUTTON_ATTACK / BUTTON_USE).
+   UpMove:   +127 jump / -127 crouch / 0 none, written to cmd->upmove.
+   TurnDelta: yaw degrees to add to cl.viewangles[YAW] (snap/smooth turn). */
+void     VR_GetControllerMove( float *forward, float *side );
+int      VR_GetControllerButtons( void );
+int      VR_GetControllerUpMove( void );
+float    VR_GetTurnDelta( void );
+
 /* ---- OpenXR frame driver (reusable TBXR layer) ---- */
 void     TBXR_FrameSetup( void );          /* xrWaitFrame + xrBeginFrame + pose update */
 void     TBXR_prepareEyeBuffer( int eye );

@@ -38,7 +38,11 @@ qboolean VR_UseScreenLayer()
 	static int frame = 0;
 	vr.using_screen_layer =
 			(frame++ < 100) || //use screen for first 100 frames - stops splash screen giving a headache
-			(bool)((vr.cin_camera && !vr.immersive_cinematics) ||
+			// cin_camera covers scripted CGCam cutscenes AND the 2D scroll-text
+			// crawl (set in the cgame).  EF cutscenes draw orthographic 2D direct
+			// to the eye buffers, which can't render immersively -- so always use
+			// the flat screen for them (NOT gated by vr_immersive_cinematics).
+			(bool)(vr.cin_camera ||
 			vr.misc_camera ||
 			clc.demoplaying ||
 			(clc.state == CA_DISCONNECTED) ||
@@ -198,6 +202,43 @@ float VR_GetEyeStereoSeparation(int eye)
 	return (eye == 0) ? half : -half;
 }
 
+// 6DoF VERTICAL: how far the rendered view should drop/rise (Quake units) as the
+// player physically ducks/stands, relative to their standing height captured at
+// start (vr.maxHeight).  Added to refdef.vieworg[2] by the engine.  <= 0 when
+// crouched.  vr_heightAdjust nudges the standing eye height.
+float VR_GetHeightOffset(void)
+{
+	if (!gAppState.SessionActive)
+	{
+		return 0.0f;
+	}
+	return (vr.hmdposition[1] - vr.maxHeight + vr_heightAdjust->value) * vr_worldscale->value;
+}
+
+// 6DoF HORIZONTAL: physically leaning/stepping translates into player movement
+// (so the body follows the head, with collision) rather than a free-floating
+// view.  Matches RealRTCWXR: the per-frame HMD position delta (tracking space)
+// scaled by vr_positional_factor and rotated by the body yaw into forward/side.
+// Outputs are -1..1-ish; the engine scales by 127 into the usercmd.
+void VR_GetPositionalMove(float *forward, float *side)
+{
+	vec2_t v;
+
+	*forward = 0.0f;
+	*side    = 0.0f;
+
+	if (!gAppState.SessionActive || vr.using_screen_layer || vr.cin_camera)
+	{
+		return;
+	}
+
+	rotateAboutOrigin(-vr.hmdposition_delta[0] * vr_positional_factor->value,
+					   vr.hmdposition_delta[2] * vr_positional_factor->value,
+					  -vr.hmdorientation[YAW], v);
+	*side    = v[0];
+	*forward = v[1];
+}
+
 int VR_SetRefreshRate(int refreshRate)
 {
 	return 0;
@@ -215,6 +256,11 @@ void VR_FrameSetup()
 
 	//get any cvar values required here
 	vr.immersive_cinematics = (vr_immersive_cinematics->value != 0.0f);
+
+	// Publish 6DoF scale config to the shared struct so the cgame can compute the
+	// floor-relative view height (in-game eye = real HMD height from the floor).
+	vr.worldscale    = vr_worldscale->value;
+	vr.height_offset = vr_height_offset->value;
 }
 
 
@@ -228,13 +274,33 @@ Engine glue used by TBXR_Common.c (keeps that file engine-agnostic)
 
 void EFXR_GetScreenResolution(int *width, int *height)
 {
-	*width = cls.glconfig.vidWidth;
-	*height = cls.glconfig.vidHeight;
+	// Used as the desktop-mirror blit DESTINATION, so it must be the actual
+	// (capped) window pixel size -- NOT cls.glconfig.vidWidth/Height, which in VR
+	// is the larger per-eye render resolution.  Returning the eye res here made
+	// the blit overflow the window and show only a cropped corner; the real window
+	// size lets the eye scale to fit.
+	if ( re.WIN_GetDrawableSize )
+	{
+		re.WIN_GetDrawableSize( width, height );
+	}
+	else
+	{
+		*width = cls.glconfig.vidWidth;
+		*height = cls.glconfig.vidHeight;
+	}
 }
 
 void EFXR_SwapWindow()
 {
-	// Wired into the GL backend in a later milestone; no-op for M1.
+	// Present the desktop mirror.  The renderer owns the GL context + SDL window,
+	// so route the swap through it (re.WIN_SwapWindow) exactly like RealRTCWXR
+	// (re.WIN_SwapWindow) / JKXR (WIN_SwapWindow).  GLimp_EndFrame suppresses the
+	// normal per-eye swap while VR is active; this is the single mirror present
+	// per frame, called from TBXR_finishEyeBuffer(eye 0) after the eye is blitted
+	// into the window's default framebuffer by ovrFramebuffer_Resolve.
+	if ( re.WIN_SwapWindow ) {
+		re.WIN_SwapWindow();
+	}
 }
 
 
@@ -288,13 +354,10 @@ qboolean VR_PreRendererInit()
 	}
 
 	// Apply a render scale to the OpenXR-recommended per-eye size.  ioEF uses the
-	// fixed-function OpenGL 1.x renderer (not a modern GPU renderer like the
-	// RealRTCWXR rend2 reference), so rendering two full recommended-size eyes
-	// (e.g. 2528x2704) per frame is far too heavy -- it drops to a few fps and
-	// the (window-coupled) mirror becomes larger than the desktop.  vr_supersample
-	// scales BOTH the eye swapchain and the engine render resolution together, so
-	// the viewport still exactly fills each eye texture (no squashing).  Raise it
-	// toward 1.0+ for higher fidelity (e.g. release builds / faster GPUs).
+	// fixed-function OpenGL 1.x renderer, so two full recommended-size eyes per
+	// frame is too heavy.  vr_supersample scales BOTH the eye swapchain and the
+	// engine render resolution together, so the viewport still exactly fills each
+	// eye texture (no squashing).
 	{
 		cvar_t *vr_supersample = Cvar_Get("vr_supersample", "0.75", CVAR_ARCHIVE | CVAR_LATCH);
 		float ss = vr_supersample->value;
@@ -308,19 +371,30 @@ qboolean VR_PreRendererInit()
 	Cvar_Set("r_customwidth", va("%d", (int)gAppState.Width));
 	Cvar_Set("r_customheight", va("%d", (int)gAppState.Height));
 	Cvar_Set("r_mode", "-1");
+	Cvar_Set("com_maxfps", "0");
+
 	Com_Printf("VR: rendering at per-eye resolution %dx%d (vr_supersample applied)\n",
 			   (int)gAppState.Width, (int)gAppState.Height);
 	return qtrue;
 }
 
-// Phase 2 -- idempotent, called once the GL context exists and is current (from
-// CL_InitRenderer, after re.BeginRegistration).  Creates the session/swapchains.
+// Phase 2 -- called once the GL context exists and is current (from
+// CL_InitRenderer, after re.BeginRegistration).  Creates the session/swapchains,
+// and RE-creates them if the engine later recreates the GL context.
+//
+// EF SP restarts the renderer several times during startup (loading/unloading the
+// UI + game modules; the final RE_Shutdown(1) destroys the window + GL context and
+// R_Init makes a new one).  The OpenXR session is bound to the GL context at
+// creation (xrCreateSession with the HGLRC), so a session created against an early
+// context becomes invalid after the context is recreated -- xrAcquireSwapchainImage
+// then fails with XR_ERROR_RUNTIME_FAILURE and the VR frame loop hangs a few
+// seconds in.  So we track the context the session was built against and rebuild
+// on change (RealRTCWXR re-runs VR init on every renderer R_Init for this reason).
+static void *vrGlContext = NULL;
+
 void VR_InitOnce()
 {
-	if (vrInitialised)
-	{
-		return;
-	}
+	void *ctx;
 
 	if (!vrPreInited || gAppState.Instance == XR_NULL_HANDLE)
 	{
@@ -328,9 +402,25 @@ void VR_InitOnce()
 		return;
 	}
 
+	ctx = TBXR_GetCurrentGLContext();
+
+	if (vrInitialised)
+	{
+		if (ctx == vrGlContext)
+		{
+			return;	// session already built against the current GL context
+		}
+		// GL context was recreated by a renderer restart -- tear down the
+		// context-bound OpenXR objects (keeping the instance) and rebuild below.
+		Com_Printf("VR: GL context changed -- rebuilding OpenXR session/swapchains.\n");
+		TBXR_DestroySessionForReinit();
+		vrInitialised = qfalse;
+	}
+
 	if (VR_Init())
 	{
 		vrInitialised = qtrue;
+		vrGlContext = ctx;
 		Com_Printf("VR: OpenXR session active.\n");
 	}
 	else
@@ -418,7 +508,193 @@ void VR_HapticDisable()
 {
 }
 
+/*
+================================================================================
+
+Controller input mapping  (movement / turn / shoot / jump / use / crouch)
+
+Modeled on RealRTCWXR VrInputDefault.c HandleInput_Default, trimmed to the
+focused ioEF scope (no saber/akimbo/gesture/weapon-align/binoculars/vehicle).
+Handedness is driven entirely by vr_control_scheme (0 = right-handed, 10 =
+left-handed) and vr_switch_sticks, exactly like RealRTCWXR, so a future full
+left-handed mode is just the cvar.
+
+The actual button/move state is exposed to the engine (cl_input.c CL_FinishMove)
+via VR_GetControllerMove / VR_GetControllerButtons / VR_GetControllerUpMove /
+VR_GetTurnDelta -- the engine ORs the buttons into the usercmd and adds the
+turn delta to cl.viewangles[YAW] (same incremental model as the HMD yaw).
+
+================================================================================
+*/
+
+/* EF game usercmd button bits (from Elite-Force-VR/game/q_shared.h -- the game
+   DLL consumes these verbatim from usercmd_t.buttons).  The engine's own
+   q_shared.h does not define BUTTON_USE / BUTTON_ALT_ATTACK, so we use the
+   numeric values the game expects. */
+#define EF_BUTTON_ATTACK      1
+#define EF_BUTTON_USE         32
+#define EF_BUTTON_ALT_ATTACK  128
+
+/* Per-frame controller output, read by the engine via the getters below. */
+static int   vr_controllerButtons = 0;      /* OR of EF_BUTTON_* this frame   */
+static int   vr_controllerUpMove  = 0;      /* +127 jump / -127 crouch / 0    */
+static float vr_turnDelta         = 0.0f;   /* yaw delta to apply this frame  */
+
 void VR_HandleControllerInput()
 {
-	// M1: controller input layer not yet ported.
+	TBXR_UpdateControllers();
+
+	// Reset per-frame outputs.
+	vr_controllerButtons = 0;
+	vr_controllerUpMove  = 0;
+	vr_turnDelta         = 0.0f;
+
+	// Ensure handedness flags are set (mirrors RealRTCWXR).  <10 = right-handed.
+	vr.right_handed = vr_control_scheme->integer < 10;
+
+	// Pick dominant (weapon) vs off hand from the control scheme, RealRTCWXR-style.
+	ovrInputStateTrackedRemote *pDom, *pOff;
+	int domFace1, domFace2;   // dominant-hand face buttons (jump, use)
+	if (vr_control_scheme->integer == LEFT_HANDED_DEFAULT)
+	{
+		pDom = &leftTrackedRemoteState_new;
+		pOff = &rightTrackedRemoteState_new;
+		domFace1 = xrButton_X;   // jump
+		domFace2 = xrButton_Y;   // use
+	}
+	else
+	{
+		pDom = &rightTrackedRemoteState_new;
+		pOff = &leftTrackedRemoteState_new;
+		domFace1 = xrButton_A;   // jump
+		domFace2 = xrButton_B;   // use
+	}
+
+	// vr_switch_sticks swaps which stick moves vs turns (the move stick is
+	// normally the OFF hand, the turn stick the DOMINANT hand -- RealRTCWXR).
+	XrVector2f *pMoveStick;
+	XrVector2f *pTurnStick;
+	if (vr_switch_sticks->integer)
+	{
+		pMoveStick = &pDom->Joystick;
+		pTurnStick = &pOff->Joystick;
+	}
+	else
+	{
+		pMoveStick = &pOff->Joystick;
+		pTurnStick = &pDom->Joystick;
+	}
+
+	// ---- Movement: move-hand thumbstick -> forward/side (deadzone + filter) ----
+	{
+		float dist = length(pMoveStick->x, pMoveStick->y);
+		float nlf  = nonLinearFilter(dist);
+		float d    = (dist > 1.0f) ? dist : 1.0f;
+		float x    = nlf * (pMoveStick->x / d);
+		float y    = nlf * (pMoveStick->y / d);
+
+		vr.player_moving = (fabs(x) + fabs(y)) > 0.05f;
+
+		float speed = (vr.move_speed == 0 ? 0.75f : (vr.move_speed == 1 ? 1.0f : 0.5f));
+		remote_movementSideways = x * speed;
+		remote_movementForward  = y * speed;
+	}
+
+	// ---- Turn: turn-hand thumbstick X -> yaw (snap or smooth) ----
+	{
+		float turnX = pTurnStick->x;
+		bool usingSnapTurn = (vr_turn_mode->integer == 0);
+
+		static qboolean snapReady = qtrue;  // re-arm when stick returns to centre
+		if (usingSnapTurn)
+		{
+			if (turnX > 0.7f)
+			{
+				if (snapReady)
+				{
+					// stick right -> turn right (yaw decreases in Quake)
+					vr_turnDelta -= vr_turn_angle->value;
+					snapReady = qfalse;
+				}
+			}
+			else if (turnX < -0.7f)
+			{
+				if (snapReady)
+				{
+					vr_turnDelta += vr_turn_angle->value;
+					snapReady = qfalse;
+				}
+			}
+			else if (turnX > -0.3f && turnX < 0.3f)
+			{
+				snapReady = qtrue;
+			}
+		}
+		else if (fabs(turnX) > 0.1f) // smooth turn
+		{
+			vr_turnDelta -= (vr_turn_angle->value / 10.0f) * turnX;
+		}
+
+		// Keep snapTurn in the shared struct in sync (cgame may read it).
+		vr.snapTurn += vr_turnDelta;
+		while (vr.snapTurn >  180.0f) vr.snapTurn -= 360.0f;
+		while (vr.snapTurn < -180.0f) vr.snapTurn += 360.0f;
+	}
+
+	// ---- Buttons ----
+	// Shoot: dominant-hand trigger.
+	if (pDom->Buttons & xrButton_Trigger)
+	{
+		vr_controllerButtons |= EF_BUTTON_ATTACK;
+	}
+
+	// Jump: dominant face button 1 (A right / X left) -> upmove +127.
+	if (pDom->Buttons & domFace1)
+	{
+		vr_controllerUpMove = 127;
+	}
+
+	// Use: dominant face button 2 (B right / Y left) -> BUTTON_USE.
+	if (pDom->Buttons & domFace2)
+	{
+		vr_controllerButtons |= EF_BUTTON_USE;
+	}
+
+	// Crouch: off-hand grip (squeeze) -> upmove -127.  Takes priority over jump
+	// only if jump isn't pressed (jump already set upmove to +127 above).
+	if ((pOff->Buttons & xrButton_GripTrigger) && vr_controllerUpMove == 0)
+	{
+		vr_controllerUpMove = -127;
+	}
+
+	// Save state for edge detection next frame (RealRTCWXR pattern).
+	rightTrackedRemoteState_old = rightTrackedRemoteState_new;
+	leftTrackedRemoteState_old  = leftTrackedRemoteState_new;
+}
+
+/* ---- engine-facing getters (called from cl_input.c CL_FinishMove) ---- */
+
+// Thumbstick movement for this frame (-1..1-ish); engine scales by 127.
+void VR_GetControllerMove(float *forward, float *side)
+{
+	*forward = remote_movementForward;
+	*side    = remote_movementSideways;
+}
+
+// OR of EF_BUTTON_* the engine should set on the usercmd this frame.
+int VR_GetControllerButtons(void)
+{
+	return vr_controllerButtons;
+}
+
+// +127 jump / -127 crouch / 0 none -- engine writes to cmd->upmove.
+int VR_GetControllerUpMove(void)
+{
+	return vr_controllerUpMove;
+}
+
+// Yaw delta (degrees) to add to cl.viewangles[YAW] this frame (snap/smooth turn).
+float VR_GetTurnDelta(void)
+{
+	return vr_turnDelta;
 }
