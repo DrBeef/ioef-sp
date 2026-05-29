@@ -1,0 +1,14 @@
+# Android build artifacts
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+.cxx/
+# ndk-build standalone output (from running ndk-build directly with
+# NDK_PROJECT_PATH=android during iteration; gradle uses its own build/ dir)
+obj/
+libs/
+
+# Generated asset pk3 (produced by the packBaseResources gradle task)
+assets/z_vr_assets_base.pk3

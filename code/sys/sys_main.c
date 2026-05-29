@@ -31,7 +31,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include <ctype.h>
 #include <errno.h>
 
-#ifndef DEDICATED
+// The standalone Android/Quest build does not link SDL (windowing is EGL via the
+// OpenXR layer); the few SDL-using helpers below are guarded for __ANDROID__.
+#if !defined(DEDICATED) && !defined(__ANDROID__)
 #ifdef USE_LOCAL_HEADERS
 #	include "SDL.h"
 #	include "SDL_cpuinfo.h"
@@ -134,7 +136,7 @@ Sys_GetClipboardData
 */
 char *Sys_GetClipboardData(void)
 {
-#ifdef DEDICATED
+#if defined(DEDICATED) || defined(__ANDROID__)
 	return NULL;
 #else
 	char *data = NULL;
@@ -234,7 +236,7 @@ static __attribute__ ((noreturn)) void Sys_Exit( int exitCode )
 {
 	CON_Shutdown( );
 
-#ifndef DEDICATED
+#if !defined(DEDICATED) && !defined(__ANDROID__)
 	SDL_Quit( );
 #endif
 
@@ -273,7 +275,7 @@ cpuFeatures_t Sys_GetProcessorFeatures( void )
 {
 	cpuFeatures_t features = 0;
 
-#ifndef DEDICATED
+#if !defined(DEDICATED) && !defined(__ANDROID__)
 	if( SDL_HasRDTSC( ) )      features |= CF_RDTSC;
 	if( SDL_Has3DNow( ) )      features |= CF_3DNOW;
 	if( SDL_HasMMX( ) )        features |= CF_MMX;
@@ -606,8 +608,13 @@ void Sys_SigHandler( int signal )
 /*
 =================
 main
+
+On the standalone Android/Quest build there is no process main(): the engine is
+driven from the VR render thread (VR_main in code/vr/android/EFXR_AndroidGlue.c),
+which is started from the Java activity via JNI.  VR_main replicates this body.
 =================
 */
+#ifndef __ANDROID__
 int main( int argc, char **argv )
 {
 	int   i;
@@ -703,4 +710,5 @@ int main( int argc, char **argv )
 
 	return 0;
 }
+#endif // !__ANDROID__
 

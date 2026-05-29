@@ -26,7 +26,12 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #ifndef __QGL_H__
 #define __QGL_H__
 
-#ifdef USE_LOCAL_HEADERS
+#if defined(__ANDROID__)
+// Standalone Android/Quest build: no SDL.  The GL1.x API the renderer uses
+// (qgl* -> gl*) is provided by gl4es, which ships a desktop-GL header set.
+#	include <GL/gl.h>
+#	include <GL/glext.h>
+#elif defined(USE_LOCAL_HEADERS)
 #	include "SDL_opengl.h"
 #else
 #	include <SDL_opengl.h>

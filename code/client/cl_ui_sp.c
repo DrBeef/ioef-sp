@@ -1089,6 +1089,17 @@ void CL_SP_InitUI( void ) {
 		gamedir = Cvar_VariableString( "com_basegame" );
 	}
 
+#ifdef __ANDROID__
+	// Android packages native libs as lib<name>.so in the app's nativeLibraryDir
+	// (exported as EF_GAMELIBDIR by the Java activity).  SP_UI_DLL_NAME resolves
+	// to "efuiaarch64.so"; the on-disk file is "libefuiaarch64.so".
+	{
+		const char *libdir = getenv( "EF_GAMELIBDIR" );
+		Com_sprintf( dllPath, sizeof(dllPath), "%s/lib" SP_UI_DLL_NAME, libdir ? libdir : "." );
+	}
+	Com_Printf( "Try loading dll file %s\n", dllPath );
+	uiLibrary = Sys_LoadLibrary( dllPath );
+#else
 	// Try basepath/gamedir/<ui dll> first
 	Com_sprintf( dllPath, sizeof(dllPath), "%s/%s/" SP_UI_DLL_NAME, basepath, gamedir );
 	Com_Printf( "Try loading dll file %s\n", dllPath );
@@ -1098,6 +1109,7 @@ void CL_SP_InitUI( void ) {
 		// Try just the UI dll in current directory
 		uiLibrary = Sys_LoadLibrary( SP_UI_DLL_NAME );
 	}
+#endif
 
 	if ( !uiLibrary ) {
 		Com_Error( ERR_FATAL, "CL_SP_InitUI: failed to load " SP_UI_DLL_NAME "\n"

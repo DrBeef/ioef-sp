@@ -359,7 +359,7 @@ qboolean VR_PreRendererInit()
 	// engine render resolution together, so the viewport still exactly fills each
 	// eye texture (no squashing).
 	{
-		cvar_t *vr_supersample = Cvar_Get("vr_supersample", "0.75", CVAR_ARCHIVE | CVAR_LATCH);
+		cvar_t *vr_supersample = Cvar_Get("vr_supersample", "1.0", CVAR_ARCHIVE | CVAR_LATCH);
 		float ss = vr_supersample->value;
 		if (ss < 0.25f) ss = 0.25f;
 		if (ss > 2.0f)  ss = 2.0f;
@@ -531,9 +531,10 @@ turn delta to cl.viewangles[YAW] (same incremental model as the HMD yaw).
    DLL consumes these verbatim from usercmd_t.buttons).  The engine's own
    q_shared.h does not define BUTTON_USE / BUTTON_ALT_ATTACK, so we use the
    numeric values the game expects. */
-#define EF_BUTTON_ATTACK      1
-#define EF_BUTTON_USE         32
-#define EF_BUTTON_ALT_ATTACK  128
+#define EF_BUTTON_ATTACK        1
+#define EF_BUTTON_USE_HOLDABLE  4    /* skips scripted cinematics (ClientCinematicThink) */
+#define EF_BUTTON_USE           32
+#define EF_BUTTON_ALT_ATTACK    128
 
 /* Per-frame controller output, read by the engine via the getters below. */
 static int   vr_controllerButtons = 0;      /* OR of EF_BUTTON_* this frame   */
@@ -648,10 +649,17 @@ void VR_HandleControllerInput()
 		vr_controllerButtons |= EF_BUTTON_ATTACK;
 	}
 
-	// Jump: dominant face button 1 (A right / X left) -> upmove +127.
+	// Dominant face button 1 (A right / X left):
+	//  - during a scripted cinematic -> BUTTON_USE_HOLDABLE, which the game's
+	//    ClientCinematicThink treats as "skip the cutscene" (a fresh press
+	//    toggles the skip/fast-forward);
+	//  - otherwise -> jump (upmove +127).
 	if (pDom->Buttons & domFace1)
 	{
-		vr_controllerUpMove = 127;
+		if (vr.cin_camera)
+			vr_controllerButtons |= EF_BUTTON_USE_HOLDABLE;
+		else
+			vr_controllerUpMove = 127;
 	}
 
 	// Use: dominant face button 2 (B right / Y left) -> BUTTON_USE.
@@ -665,6 +673,21 @@ void VR_HandleControllerInput()
 	if ((pOff->Buttons & xrButton_GripTrigger) && vr_controllerUpMove == 0)
 	{
 		vr_controllerUpMove = -127;
+	}
+
+	// Menu button (the '|||' / menu button -- left controller on Touch) toggles
+	// the in-game menu so the player can Save / Load / Quit.  We inject an Escape
+	// key event on the press edge (a momentary tap: the down toggles the menu, the
+	// up is a no-op for Escape).  Checked on BOTH hands so it works whichever
+	// controller carries the menu button across vendors.
+	{
+		qboolean menuNow = ((leftTrackedRemoteState_new.Buttons | rightTrackedRemoteState_new.Buttons) & xrButton_Enter) != 0;
+		qboolean menuWas = ((leftTrackedRemoteState_old.Buttons | rightTrackedRemoteState_old.Buttons) & xrButton_Enter) != 0;
+		if (menuNow && !menuWas)
+		{
+			Com_QueueEvent(0, SE_KEY, K_ESCAPE, qtrue,  0, NULL);
+			Com_QueueEvent(0, SE_KEY, K_ESCAPE, qfalse, 0, NULL);
+		}
 	}
 
 	// Save state for edge detection next frame (RealRTCWXR pattern).

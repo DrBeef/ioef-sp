@@ -81,6 +81,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "server.h"
 #include "../sys/sys_loadlib.h"
 #include "../qcommon/sp_types.h"
+#ifdef BUILD_VR
+#include "../vr/VrClientInfo.h"   // the engine's global vr_client_info_t vr
+#endif
 
 // ============================================================================
 // SP game module type definitions
@@ -171,6 +174,15 @@ typedef struct {
 	int	*S_Override;
 	void	*(*Malloc)( int bytes );
 	void	(*Free)( void *buf );
+
+	// VR state pointer (the engine's global vr_client_info_t; NULL when not a VR
+	// build/session).  Appended at the END of the table so existing non-VR game
+	// DLLs that don't declare it stay ABI-compatible (they read only the prefix
+	// and ignore this trailing field) -- no SP_GAME_API_VERSION bump, matching
+	// how the VR refimport fields were added engine-side.  The SP game module
+	// will read this (cast to vr_client_info_t*) for server-side motion-weapon
+	// projectile origins once motion controllers land.
+	void	*vr;
 } sp_game_import_t;
 
 //
@@ -2207,6 +2219,14 @@ static void SV_SP_InitGameImport( void ) {
 
 	gi.Malloc					= SV_SP_Malloc;
 	gi.Free						= SV_SP_Free;
+
+#ifdef BUILD_VR
+	// Hand the engine's global VR state to the SP game module (server-side
+	// motion-weapon support).  Harmless until the game module reads it.
+	gi.vr						= &vr;
+#else
+	gi.vr						= NULL;
+#endif
 }
 
 /*
@@ -2315,6 +2335,18 @@ void SV_SP_InitGameProgs( void ) {
 			gamedir = Cvar_VariableString( "com_basegame" );
 		}
 
+#ifdef __ANDROID__
+		// Android packages native libs as lib<name>.so in the app's
+		// nativeLibraryDir (exported as EF_GAMELIBDIR by the Java activity).
+		// SP_GAME_DLL_NAME resolves to "efgameaarch64.so"; the on-disk file is
+		// "libefgameaarch64.so".
+		{
+			const char *libdir = getenv( "EF_GAMELIBDIR" );
+			Com_sprintf( dllPath, sizeof(dllPath), "%s/lib" SP_GAME_DLL_NAME, libdir ? libdir : "." );
+		}
+		Com_Printf( "Try loading dll file %s\n", dllPath );
+		gameLibrary = Sys_LoadLibrary( dllPath );
+#else
 		Com_sprintf( dllPath, sizeof(dllPath), "%s/%s/" SP_GAME_DLL_NAME, basepath, gamedir );
 		Com_Printf( "Try loading dll file %s\n", dllPath );
 		gameLibrary = Sys_LoadLibrary( dllPath );
@@ -2322,6 +2354,7 @@ void SV_SP_InitGameProgs( void ) {
 		if ( !gameLibrary ) {
 			gameLibrary = Sys_LoadLibrary( SP_GAME_DLL_NAME );
 		}
+#endif
 
 		if ( !gameLibrary ) {
 			Com_Error( ERR_FATAL, "SV_SP_InitGameProgs: failed to load " SP_GAME_DLL_NAME "\n"

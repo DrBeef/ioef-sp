@@ -20,7 +20,16 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 ===========================================================================
 */
 
-#ifdef DEDICATED
+#if defined(__ANDROID__)
+/* Standalone Android/Quest build does not use SDL; the SP game/UI modules are
+   loaded with plain dlopen (see SV_SP_InitGameProgs / CL_SP_InitUI, which build
+   the lib%s.so path from EF_GAMELIBDIR on Android). */
+#	include <dlfcn.h>
+#	define Sys_LoadLibrary(f) dlopen(f,RTLD_NOW)
+#	define Sys_UnloadLibrary(h) dlclose(h)
+#	define Sys_LoadFunction(h,fn) dlsym(h,fn)
+#	define Sys_LibraryError() dlerror()
+#elif defined(DEDICATED)
 #	ifdef _WIN32
 #		include <windows.h>
 #		define Sys_LoadLibrary(f) (void*)LoadLibrary(f)

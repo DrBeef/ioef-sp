@@ -19,6 +19,8 @@ helpers actually defined in VrInputCommon.c are declared here.
 
 #ifdef _WIN32
 #include "windows/TBXR_Common.h"
+#elif defined(__ANDROID__)
+#include "android/TBXR_Common.h"
 #endif
 
 

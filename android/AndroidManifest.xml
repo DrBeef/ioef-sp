@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- EFXR - Elite Force VR standalone (Meta Quest + Pico 4 / Neo3). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    android:versionCode="1"
+    android:versionName="1.0"
+    android:installLocation="auto">
+
+    <!-- OpenGL ES 3.1 required for Quest/Pico VR (gl4es targets GLES3). -->
+    <uses-feature android:glEsVersion="0x00030001" android:required="true"/>
+    <!-- VR head tracking required. -->
+    <uses-feature android:name="android.hardware.vr.headtracking" android:version="1" android:required="true" />
+    <!-- Touchscreen not required for VR. -->
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <!-- All-files access for /sdcard/EFXR game data (Android 11+, target SDK 34). -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
+    <application
+        android:label="@string/app_name"
+        android:allowBackup="false"
+        android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+        android:hardwareAccelerated="true"
+        android:extractNativeLibs="true"
+        android:requestLegacyExternalStorage="true">
+
+        <!-- Meta Quest configuration -->
+        <meta-data android:name="com.oculus.supportedDevices" android:value="quest2|questpro|quest3"/>
+        <meta-data android:name="com.oculus.ossplash" android:value="true"/>
+        <meta-data android:name="com.oculus.dualcorecpuset" android:value="true"/>
+        <meta-data android:name="com.oculus.trade_cpu_for_gpu_amount" android:value="-1"/>
+
+        <!-- Pico XR support (Pico 4 / 4 Ultra / Neo3) -->
+        <meta-data android:name="pvr.app.type" android:value="vr"/>
+        <meta-data android:name="pxr.controller" android:value="1"/>
+
+        <!-- Legacy GearVR / Oculus Go -->
+        <meta-data android:name="com.samsung.android.vr.application.mode" android:value="vr_only"/>
+
+        <!-- Launcher: storage-permission gate + asset deploy, then starts the VR activity. -->
+        <activity android:name="com.teambeefvr.efxr.LauncherActivity"
+            android:label="@string/app_name"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+            android:launchMode="singleTask"
+            android:screenOrientation="landscape"
+            android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode"
+            android:excludeFromRecents="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="com.oculus.intent.category.VR" />
+                <category android:name="org.khronos.openxr.intent.category.IMMERSIVE_HMD" />
+            </intent-filter>
+        </activity>
+
+        <!-- Main VR activity (started by LauncherActivity after permission grant). -->
+        <activity android:name="com.teambeefvr.efxr.GLES3JNIActivity"
+            android:label="@string/app_name"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+            android:launchMode="singleTask"
+            android:screenOrientation="landscape"
+            android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode"
+            android:excludeFromRecents="false"
+            android:exported="false">
+        </activity>
+    </application>
+</manifest>

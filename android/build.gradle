@@ -1,0 +1,122 @@
+// EFXR - Elite Force VR, Meta Quest / Pico standalone build.
+// Open the `android/` folder in Android Studio to build, or run ./gradlew assembleDebug.
+//
+// Tooling level matches OpenJKDF2 (AGP 8.2.2 / Gradle 8.5 / NDK r26 / SDK 34),
+// but the native module graph is ndk-build (Android.mk) so it can reuse the
+// JKXR gl4es + prebuilt-loader makefiles and the RTCWQuest-style separate .so
+// game modules directly.
+
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.2.2'
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: 'com.android.application'
+
+android {
+    namespace "com.teambeefvr.efxr"
+    compileSdk 34
+    ndkVersion "26.1.10909125"   // compatible with AGP 8.2
+
+    packaging {
+        jniLibs {
+            keepDebugSymbols += "**/*.so"   // keep symbols for native (logcat) debugging
+            // Extract the .so to nativeLibraryDir on disk so the SP game/UI
+            // modules can be dlopen'd by path (EF_GAMELIBDIR); matches
+            // android:extractNativeLibs="true" in the manifest.
+            useLegacyPackaging = true
+        }
+    }
+
+    defaultConfig {
+        applicationId "com.teambeefvr.efxr"
+        minSdk 29                // Quest 2/3, Pico Neo3/4 minimum
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+
+        externalNativeBuild {
+            ndkBuild {
+                def numProcs = Runtime.runtime.availableProcessors()
+                arguments "V=0", "-j$numProcs"
+                abiFilters 'arm64-v8a'
+            }
+        }
+    }
+
+    externalNativeBuild {
+        ndkBuild {
+            path file('jni/Android.mk')
+        }
+    }
+
+    buildTypes {
+        // Debug uses AGP's auto-generated debug keystore (~/.android/debug.keystore).
+        debug {
+            debuggable true
+            jniDebuggable true
+            externalNativeBuild {
+                ndkBuild { arguments "NDK_DEBUG=1" }
+            }
+        }
+        // Release is left unsigned here; sideload the debug APK, or wire a
+        // signingConfig for store submission.
+        release {
+            debuggable false
+            jniDebuggable false
+            minifyEnabled false
+            externalNativeBuild {
+                ndkBuild { arguments "NDK_DEBUG=0" }
+            }
+        }
+    }
+
+    sourceSets.main {
+        manifest.srcFile 'AndroidManifest.xml'
+        java.srcDirs = ['java']
+        res.srcDirs = ['res']
+        assets.srcDirs = ['assets']
+        jni.srcDirs = ['jni']
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
+
+// Bundle the VR-specific overrides (menu/shader tweaks) as a pk3 the engine
+// loads on top of the retail paks.  Built from android/z_vr_assets_base/.
+task packBaseResources(type: Zip) {
+    archiveFileName = "z_vr_assets_base.pk3"
+    destinationDirectory = file("assets")
+    from "z_vr_assets_base"
+}
+
+// packBaseResources writes into assets/, which the asset-merge tasks consume;
+// AGP 8 requires the producer be declared as a dependency of those tasks.
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }.configureEach {
+    dependsOn packBaseResources
+}
+preBuild.dependsOn packBaseResources
